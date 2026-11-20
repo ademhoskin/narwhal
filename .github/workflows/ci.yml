@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: test
+        run: nix develop --command dotnet test tests/Narwhal.Tests --nologo
+
+  aot:
+    name: native aot binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: build the package
+        run: nix build .#default
+      - name: smoke test
+        run: |
+          test "$(result/bin/narwhal version)" = "0.1.0"
+          result/bin/narwhal --help > /dev/null
+          cp -L result/bin/narwhal narwhal-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: narwhal-linux-x64
+          path: narwhal-linux-x64
+
+  example:
+    name: example builds, deploys and verifies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: build narwhal
+        run: nix build .#default
+      - name: build images and write the lock
+        working-directory: examples/hello
+        run: ../../result/bin/narwhal build
+      - name: verify reproducibility
+        working-directory: examples/hello
+        run: ../../result/bin/narwhal verify
+      - name: deploy with podman
+        working-directory: examples/hello
+        run: |
+          ../../result/bin/narwhal up
+          curl -fsS --retry 5 --retry-connrefused http://127.0.0.1:18080/
+          ../../result/bin/narwhal ps
+      - name: tear down
+        if: always()
+        working-directory: examples/hello
+        run: ../../result/bin/narwhal down --volumes || true

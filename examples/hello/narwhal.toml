@@ -1,0 +1,34 @@
+# A deliberately tiny service container: one nix-built HTTP service and one
+# prebuilt image pulled from a registry.
+
+name = "narwhal-hello"
+flake = "."
+
+[build]
+attr_prefix = "narwhal.images"
+
+[deploy]
+restart = "no"
+wait_seconds = 30
+
+[[service]]
+name = "web"
+description = "static page served by the image narwhal builds"
+image = "narwhal-example/web"
+tag = "latest"
+ports = ["18080:8080"]
+
+[service.healthcheck]
+command = "wget -q -O /dev/null http://127.0.0.1:8080/"
+interval = 1
+retries = 20
+timeout = 2
+
+[[service]]
+name = "sidecar"
+description = "prebuilt image: narwhal pulls it instead of building"
+prebuilt = true
+image = "docker.io/library/busybox"
+tag = "1.37"
+command = ["sleep", "infinity"]
+depends_on = ["web"]

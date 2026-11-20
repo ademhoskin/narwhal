@@ -1,0 +1,10 @@
+bin/
+obj/
+result
+result-*
+*.user
+.vs/
+.idea/
+.dotnet-home/
+.nuget/
+artifacts/
