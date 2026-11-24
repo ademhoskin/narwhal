@@ -6,7 +6,12 @@ using Narwhal.Podman;
 
 namespace Narwhal.Reconcile;
 
-public sealed record ReconcileOutcome(ReconcileStatusDocument Status, ReconcileExitCode ExitCode, bool Busy = false, string? Message = null);
+public sealed record ReconcileOutcome(
+    ReconcileStatusDocument Status,
+    ReconcileExitCode ExitCode,
+    bool Busy = false,
+    string? Message = null,
+    bool RestartRequested = false);
 
 /// <summary>One-shot reconcile engine shared by the timer and manual invocation.</summary>
 public sealed class ReconcileEngine
@@ -21,6 +26,7 @@ public sealed class ReconcileEngine
     private readonly TimeProvider _time;
     private readonly IStatusChannel? _statusChannel;
     private readonly string? _statusKeyId;
+    private readonly AgentUpgrader? _agentUpgrader;
     private string? _hostId;
     private List<string> _cycleSecretValues = [];
     private readonly string _startedAt;
@@ -35,7 +41,8 @@ public sealed class ReconcileEngine
         Func<TimeSpan, CancellationToken, Task>? delay = null,
         TimeProvider? time = null,
         IStatusChannel? statusChannel = null,
-        string? statusKeyId = null)
+        string? statusKeyId = null,
+        AgentUpgrader? agentUpgrader = null)
     {
         _config = config;
         _store = store;
@@ -48,15 +55,23 @@ public sealed class ReconcileEngine
         _startedAt = Timestamp(_time.GetUtcNow());
         _statusChannel = statusChannel;
         _statusKeyId = statusKeyId;
+        _agentUpgrader = agentUpgrader;
     }
 
     public async Task<ReconcileOutcome> RunOnceAsync(CancellationToken cancellationToken)
     {
         _cycleSecretValues = [];
         var started = _time.GetUtcNow();
+        AgentRevertedUpgrade? reverted = null;
+        if (_agentUpgrader is not null)
+        {
+            reverted = await _agentUpgrader.RevertExpiredAsync(cancellationToken);
+            reverted ??= await _agentUpgrader.ReadRevertedAsync(cancellationToken);
+        }
         var state = _store.LoadStateForRecovery(out var stateLost, out var stateWarning);
         if (stateWarning is not null)
             _reporter.Warn(stateWarning);
+        var freshRevert = reverted is not null && ApplyRevertedAgent(state, reverted);
 
         var statusStore = new StatusStore(_config.StateDirectory);
         var history = statusStore.NewestHistory();
@@ -87,7 +102,9 @@ public sealed class ReconcileEngine
         _store.SaveState(state);
 
         var status = NewStatus(state, started);
-        var outcome = await RunCycleAsync(state, status, started, stateLost, cancellationToken);
+        if (freshRevert)
+            await PublishTransitionAsync(state, status, ReconcilePhases.Degraded, cancellationToken);
+        var outcome = await RunCycleAsync(state, status, started, stateLost, freshRevert, cancellationToken);
         return await PublishStatusAsync(state, outcome, cancellationToken);
     }
 
@@ -129,7 +146,9 @@ public sealed class ReconcileEngine
         if (stateLost)
         {
             state.BlockedGeneration = remote.Document.BlockedGeneration;
-            state.BlockedAgentDigest = remote.Document.Host.BlockedAgentDigest;
+            var remoteBlocked = AgentDigest.TryNormalize(remote.Document.Host.BlockedAgentDigest);
+            if (state.BlockedAgentDigest is null)
+                state.BlockedAgentDigest = remoteBlocked;
         }
     }
 
@@ -334,6 +353,7 @@ public sealed class ReconcileEngine
         ReconcileStatusDocument status,
         DateTimeOffset started,
         bool stateLost,
+        bool freshRevert,
         CancellationToken cancellationToken)
     {
         var journal = _store.LoadJournal(out var warning);
@@ -396,6 +416,62 @@ public sealed class ReconcileEngine
                 resolved.Manifest.Digest,
                 resolved.Manifest.Bytes);
 
+            if (_agentUpgrader is not null && document.Agent is { } agentSpec)
+            {
+                var upgrade = await _agentUpgrader.EvaluateAsync(agentSpec, state, cancellationToken);
+                switch (upgrade.Action)
+                {
+                    case AgentUpgradeAction.Staged:
+                        SetObserved(status, generation, resolved);
+                        state.Phase = ReconcilePhases.Idle;
+                        state.LastError = null;
+                        _store.SaveState(state);
+                        Finish(status, state);
+                        return new ReconcileOutcome(
+                            status,
+                            ReconcileExitCode.Success,
+                            Message: "agent upgrade staged",
+                            RestartRequested: true);
+                    case AgentUpgradeAction.Blocked:
+                        SetObserved(status, generation, resolved);
+                        if (!freshRevert || state.LastError?.Code != AgentUpgrader.UpgradeFailedCode)
+                        {
+                            state.Phase = ReconcilePhases.Degraded;
+                            state.LastError = new LastErrorInfo
+                            {
+                                Code = AgentUpgrader.UpgradeBlockedCode,
+                                Message = upgrade.Message ?? "agent binary is blocked",
+                                At = Timestamp(_time.GetUtcNow()),
+                            };
+                        }
+
+                        _store.SaveState(state);
+                        Finish(status, state);
+                        _reporter.Warn($"agent_upgrade_blocked: {upgrade.Message}");
+                        return new ReconcileOutcome(status, ReconcileExitCode.Success);
+                    case AgentUpgradeAction.Failed when upgrade.DigestBlocked:
+                        SetObserved(status, generation, resolved);
+                        state.BlockedAgentDigest = AgentDigest.FromBinarySha256(agentSpec.BinarySha256);
+                        if (_agentUpgrader.InstalledVersion is { } installed)
+                            state.AgentRollbackVersion = installed;
+                        state.Phase = ReconcilePhases.Degraded;
+                        state.LastError = new LastErrorInfo
+                        {
+                            Code = AgentUpgrader.UpgradeFailedCode,
+                            Message = upgrade.Message ?? "agent upgrade failed",
+                            At = Timestamp(_time.GetUtcNow()),
+                        };
+                        _store.SaveState(state);
+                        Finish(status, state);
+                        return new ReconcileOutcome(status, ReconcileExitCode.Success);
+                    case AgentUpgradeAction.Failed:
+                        _reporter.Warn($"agent upgrade deferred: {upgrade.Message}");
+                        break;
+                    case AgentUpgradeAction.DowngradeRefused:
+                        break;
+                }
+            }
+
             var plans = await ServicePlanner.BuildAsync(document, _secrets, cancellationToken);
             MergeSecretValues(plans);
             EnsureBindMounts(plans, path => File.Exists(path) || Directory.Exists(path));
@@ -439,6 +515,7 @@ public sealed class ReconcileEngine
                     ClearJournal();
 
                 Finish(status, state);
+                await MarkAgentHealthyAsync(cancellationToken);
                 _reporter.Ok($"generation {generation} is active; no changes");
                 return new ReconcileOutcome(status, ReconcileExitCode.Success);
             }
@@ -555,6 +632,7 @@ public sealed class ReconcileEngine
             }
 
             Finish(status, state);
+            await MarkAgentHealthyAsync(cancellationToken);
             _reporter.Ok($"applied generation {generation}");
             return new ReconcileOutcome(status, ReconcileExitCode.Success);
         }
@@ -796,6 +874,59 @@ public sealed class ReconcileEngine
         state.ActiveGeneration = generation;
         state.ActivePayloadDigest = payloadDigest;
         state.ActiveManifestDigest = manifestDigest;
+    }
+
+    private bool ApplyRevertedAgent(ReconcileState state, AgentRevertedUpgrade reverted)
+    {
+        var digest = AgentDigest.FromBinarySha256(reverted.BinarySha256);
+        state.BlockedAgentDigest = digest;
+        if (reverted.PreviousVersion is { } previous)
+            state.AgentRollbackVersion = previous;
+
+        if (string.Equals(state.LastAgentRevertDigest, digest, StringComparison.Ordinal))
+            return false;
+
+        state.LastAgentRevertDigest = digest;
+        state.Phase = ReconcilePhases.Degraded;
+        state.LastError = new LastErrorInfo
+        {
+            Code = AgentUpgrader.UpgradeFailedCode,
+            Message = reverted.PreviousVersion is { } known
+                ? $"agent {reverted.Version} did not report boot-ok; reverted to {known}"
+                : $"agent {reverted.Version} did not report boot-ok",
+            At = Timestamp(_time.GetUtcNow()),
+        };
+        return true;
+    }
+
+    private async Task MarkAgentHealthyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_agentUpgrader is not null)
+            {
+                if (!await _agentUpgrader.MarkHealthyAsync(cancellationToken))
+                    _reporter.Warn("agent boot-ok was deferred because upgrade state is busy");
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or AgentConfigException)
+        {
+            _reporter.Warn($"cannot record agent boot-ok: {e.Message}");
+        }
+    }
+
+    private static void SetObserved(
+        ReconcileStatusDocument status,
+        long generation,
+        ResolvedDesired resolved)
+    {
+        status.Observed = new StatusObserved
+        {
+            Generation = generation,
+            PayloadDigest = resolved.Verified.PayloadDigest,
+            ManifestDigest = resolved.Manifest.Digest,
+            KeyId = resolved.Verified.VerifyingKeyIds.FirstOrDefault(),
+        };
     }
 
     private async Task ApplyAsync(DiffPlan diff, long generation, ReconcileJournal journal, CancellationToken cancellationToken)
@@ -1285,9 +1416,10 @@ public sealed class ReconcileEngine
             Id = _hostId,
             BootId = TryReadBootId(),
             StartedAt = _startedAt,
+            NarwhaldVersion = _agentUpgrader?.InstalledVersion ?? App.Version,
             StatusKeyId = _statusKeyId,
             AgentRollbackVersion = state.AgentRollbackVersion,
-            BlockedAgentDigest = state.BlockedAgentDigest,
+            BlockedAgentDigest = AgentDigest.TryNormalize(state.BlockedAgentDigest),
         },
         Phase = state.Phase,
         HighestGeneration = state.HighestGeneration,
@@ -1307,7 +1439,7 @@ public sealed class ReconcileEngine
         status.HighestGeneration = state.HighestGeneration;
         status.BlockedGeneration = state.BlockedGeneration;
         status.Host.AgentRollbackVersion = state.AgentRollbackVersion;
-        status.Host.BlockedAgentDigest = state.BlockedAgentDigest;
+        status.Host.BlockedAgentDigest = AgentDigest.TryNormalize(state.BlockedAgentDigest);
         if (state.ActiveGeneration is { } generation && state.ActivePayloadDigest is { } digest)
         {
             status.Active = new StatusActive

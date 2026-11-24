@@ -101,15 +101,16 @@ public class StatusCommandLineTests
         Assert.Equal("prod", options.Value("target"));
         Assert.True(options.Json);
         Assert.Contains("status", CommandLine.Usage(), StringComparison.Ordinal);
-        Assert.DoesNotContain("--watch", CommandLine.Usage(CommandLine.Find("status")!), StringComparison.Ordinal);
+        Assert.Contains("--watch", CommandLine.Usage(CommandLine.Find("status")!), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void RejectsWatchUntilTheDaemonShips()
+    public void ParsesWatch()
     {
-        var error = Assert.Throws<UsageException>(() => CommandLine.Parse(["status", "--watch"]));
-        Assert.Contains("unknown option '--watch'", error.Message, StringComparison.Ordinal);
-        Assert.Contains("narwhal status", error.Message, StringComparison.Ordinal);
+        var options = CommandLine.Parse(["status", "--watch"]);
+
+        Assert.True(options.Flag("watch"));
+        Assert.Equal("status", options.Command);
     }
 
     [Theory]

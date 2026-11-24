@@ -24,6 +24,27 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Narwhal.Tests" />
+    <EmbeddedResource Include="../../deploy/systemd/user/narwhald.service" LogicalName="Narwhal.Units.narwhald.service" />
+    <EmbeddedResource Include="../../deploy/systemd/user/narwhald-reconcile.service" LogicalName="Narwhal.Units.narwhald-reconcile.service" />
+    <EmbeddedResource Include="../../deploy/systemd/user/narwhald-reconcile.timer" LogicalName="Narwhal.Units.narwhald-reconcile.timer" />
+    <EmbeddedResource Include="../../deploy/systemd/system/narwhald-guard.service" LogicalName="Narwhal.Units.narwhald-guard.service" />
+    <EmbeddedResource Include="../../deploy/systemd/system/narwhald-guard.timer" LogicalName="Narwhal.Units.narwhald-guard.timer" />
   </ItemGroup>
 
+  <Target Name="PublishNarwhald" AfterTargets="Publish">
+    <Copy
+      SourceFiles="$(PublishDir)$(AssemblyName)"
+      DestinationFiles="$(PublishDir)narwhald"
+      Condition="Exists('$(PublishDir)$(AssemblyName)')" />
+    <Copy
+      SourceFiles="$(PublishDir)$(AssemblyName)"
+      DestinationFiles="$(PublishDir)narwhal-guard"
+      Condition="Exists('$(PublishDir)$(AssemblyName)')" />
+    <Exec
+      Command="chmod 755 &quot;$(PublishDir)narwhald&quot;"
+      Condition="Exists('$(PublishDir)narwhald') and !$([MSBuild]::IsOSPlatform('Windows'))" />
+    <Exec
+      Command="chmod 755 &quot;$(PublishDir)narwhal-guard&quot;"
+      Condition="Exists('$(PublishDir)narwhal-guard') and !$([MSBuild]::IsOSPlatform('Windows'))" />
+  </Target>
 </Project>

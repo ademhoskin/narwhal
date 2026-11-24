@@ -1,0 +1,15 @@
+[Unit]
+Description=narwhal reconcile agent
+
+[Service]
+Type=simple
+ExecStart=/var/lib/narwhal/agent/current/narwhald --config /etc/narwhal/agent.toml
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+KillMode=process
+Delegate=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

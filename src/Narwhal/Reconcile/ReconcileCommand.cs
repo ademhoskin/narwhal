@@ -39,33 +39,8 @@ public static class ReconcileCommand
                 return (int)ReconcileExitCode.Success;
             }
 
-            using var registry = OciRegistryClient.Create(config, reporter);
-            var runner = new ProcessRunner(reporter, options.Verbose);
-            var runtime = new PodmanRuntime(
-                runner,
-                reporter,
-                imageAuth: new ImagePullAuth(config.ImageRegistry, config.ImageRegistryAuth));
-            var statusKey = LoadStatusKey(config, reporter);
-            var statusRepository = config.StatusRepository ??
-                                   StatusRepository.Derive(config.Project, config.Target);
-            IStatusChannel statusChannel = new StatusArtifactChannel(
-                statusRepository,
-                registry,
-                config.StatusKeys,
-                config.Expectation,
-                statusKey,
-                new StatusStore(config.StateDirectory),
-                reporter);
-            var engine = new ReconcileEngine(
-                config,
-                store,
-                registry,
-                runtime,
-                new FileSecretResolver(),
-                reporter,
-                statusChannel: statusChannel,
-                statusKeyId: statusKey?.KeyId);
-            var outcome = await engine.RunOnceAsync(cancellationToken);
+            await RunAgentGuardAsync(config, reporter, cancellationToken);
+            var outcome = await RunEngineAsync(config, store, reporter, options.Verbose, cancellationToken);
 
             if (options.Json)
                 WriteJson(outcome.Status);
@@ -88,7 +63,65 @@ public static class ReconcileCommand
         }
     }
 
-    private static StatusSigningKey? LoadStatusKey(AgentConfig config, Reporter reporter)
+    internal static async Task RunAgentGuardAsync(
+        AgentConfig config,
+        Reporter reporter,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var guard = new AgentUpgrader(config.StateDirectory, source: null, reporter);
+            await guard.PrepareStartAsync(cancellationToken);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or AgentConfigException)
+        {
+            reporter.Warn($"agent guard could not run: {e.Message}");
+        }
+    }
+
+    /// <summary>Builds the engine and runs one cycle. The caller owns the lock.</summary>
+    internal static async Task<ReconcileOutcome> RunEngineAsync(
+        AgentConfig config,
+        ReconcileStore store,
+        Reporter reporter,
+        bool verbose,
+        CancellationToken cancellationToken)
+    {
+        using var registry = OciRegistryClient.Create(config, reporter);
+        var runner = new ProcessRunner(reporter, verbose);
+        var runtime = new PodmanRuntime(
+            runner,
+            reporter,
+            imageAuth: new ImagePullAuth(config.ImageRegistry, config.ImageRegistryAuth));
+        var statusKey = LoadStatusKey(config, reporter);
+        var statusRepository = config.StatusRepository ??
+                               StatusRepository.Derive(config.Project, config.Target);
+        IStatusChannel statusChannel = new StatusArtifactChannel(
+            statusRepository,
+            registry,
+            config.StatusKeys,
+            config.Expectation,
+            statusKey,
+            new StatusStore(config.StateDirectory),
+            reporter);
+        var upgrader = new AgentUpgrader(
+            config.StateDirectory,
+            new RegistryAgentImageSource(registry),
+            reporter);
+        var engine = new ReconcileEngine(
+            config,
+            store,
+            registry,
+            runtime,
+            new FileSecretResolver(),
+            reporter,
+            statusChannel: statusChannel,
+            statusKeyId: statusKey?.KeyId,
+            agentUpgrader: upgrader);
+        return await engine.RunOnceAsync(cancellationToken);
+    }
+
+    internal static StatusSigningKey? LoadStatusKey(AgentConfig config, Reporter reporter)
     {
         if (config.StatusKeyPath is null)
         {
@@ -137,6 +170,11 @@ public static class ReconcileCommand
             Epoch = state.StatusEpoch,
             StatusSeq = state.StatusSeq,
             Updated = DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+            Host = new StatusHost
+            {
+                NarwhaldVersion = new AgentUpgrader(config.StateDirectory, source: null, new Reporter(false, false))
+                    .InstalledVersion ?? App.Version,
+            },
             Phase = state.Phase,
             HighestGeneration = state.HighestGeneration,
             BlockedGeneration = state.BlockedGeneration,

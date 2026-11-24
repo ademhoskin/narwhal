@@ -51,6 +51,7 @@ public sealed class ReconcileStore
         if (state.HighestGeneration < 0 || state.StatusSeq < 0 || state.StatusEpoch < 0)
             throw new AgentConfigException($"cannot read {StatePath}: invalid generation counters");
 
+        NormalizeAgentDigests(state);
         return state;
     }
 
@@ -84,9 +85,10 @@ public sealed class ReconcileStore
                 return new ReconcileState();
             }
 
+            NormalizeAgentDigests(state);
             return state;
         }
-        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or AgentConfigException)
         {
             lost = true;
             warning = $"ignoring unreadable state {StatePath}: {e.Message}; status epoch will advance";
@@ -94,8 +96,17 @@ public sealed class ReconcileStore
         }
     }
 
-    public void SaveState(ReconcileState state) =>
+    private static void NormalizeAgentDigests(ReconcileState state)
+    {
+        state.BlockedAgentDigest = AgentDigest.TryNormalize(state.BlockedAgentDigest);
+        state.LastAgentRevertDigest = AgentDigest.TryNormalize(state.LastAgentRevertDigest);
+    }
+
+    public void SaveState(ReconcileState state)
+    {
+        NormalizeAgentDigests(state);
         WriteAtomic(StatePath, JsonSerializer.SerializeToUtf8Bytes(state, ReconcileJsonContext.Compact.ReconcileState));
+    }
 
     public ReconcileJournal? LoadJournal(out string? warning)
     {
@@ -203,15 +214,18 @@ public sealed class ReconcileStore
     internal static void WriteAtomic(string path, ReadOnlySpan<byte> bytes)
     {
         var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
+        if (string.IsNullOrEmpty(directory))
+            directory = ".";
+        Directory.CreateDirectory(directory);
 
-        var temporary = path + ".tmp";
+        var temporary = Path.Combine(
+            directory,
+            "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("n") + ".tmp");
         try
         {
             using (var stream = new FileStream(
                        temporary,
-                       FileMode.Create,
+                       FileMode.CreateNew,
                        FileAccess.Write,
                        FileShare.None,
                        4096,

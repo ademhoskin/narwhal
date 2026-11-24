@@ -200,6 +200,32 @@ public class OciRegistryClientTests
     }
 
     [Fact]
+    public async Task RejectsABlobAboveTheStreamingSizeLimit()
+    {
+        var handler = new FakeHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new OversizedContent(),
+        });
+
+        using var client = new OciRegistryClient("registry.test", new RegistryAuthConfig { Insecure = true }, handler: handler);
+        var error = await Assert.ThrowsAsync<RegistryException>(
+            () => client.GetBlobAsync(Repository, Digest('a'), CancellationToken.None));
+        Assert.Contains("limit", error.Message, StringComparison.Ordinal);
+    }
+
+    private sealed class OversizedContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            Task.CompletedTask;
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = OciRegistryClient.MaximumBlobBytes + 1;
+            return true;
+        }
+    }
+
+    [Fact]
     public async Task ReportsAuthenticationFailures()
     {
         var handler = new FakeHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized));

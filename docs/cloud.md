@@ -866,8 +866,9 @@ highest_generation      highest generation ever accepted
 highest_payload_digest  payload digest of that generation
 active_generation       generation currently applied
 blocked_generation      generation that failed health and must not be retried
-blocked_agent_digest    SHA-256 of an agent binary that failed self-upgrade
+blocked_agent_digest    canonical sha256:<hex> digest of an agent binary that failed self-upgrade
 agent_rollback_version  last known-good agent version after a revert
+last_agent_revert_digest  canonical digest of the last revert already reported
 status_epoch            status ordering epoch
 status_seq              status ordering sequence
 ```
@@ -964,6 +965,9 @@ A `flock` on `/var/lib/narwhal/lock` serializes the daemon and one-shot. A
 one-shot run that cannot take the lock exits `0` with "another reconcile is
 running" and does not touch state. The daemon holds the lock only for a reconcile
 cycle, not while sleeping, so a manual one-shot can run between polls.
+Upgrade markers use a separate `flock` on `/var/lib/narwhal/agent-upgrade.lock`.
+The guard takes it non-blocking so it never waits behind a reconcile, and the
+agent takes it while staging or reading markers.
 
 Agent config, `/etc/narwhal/agent.toml`:
 
@@ -1862,6 +1866,15 @@ Provider-specific code is confined to:
    the other. It enables the distribution's `podman-restart.service` user unit
    if present. Nothing is enabled until the agent binary, status key, config,
    and trust set are all in place.
+   Bootstrap copies the verified agent binary to a root-owned staging path
+   outside the agent-writable tree, then installs the stable guard with
+   `narwhald install-guard --system --guard-binary /etc/narwhal/narwhald.stage --sha256 <binary_sha256>`.
+   The command refuses a non-root caller, a symlink, a non-regular or empty
+   source, a source not owned by root, a group- or world-writable source, and a
+   SHA-256 pin mismatch. It opens the source once, copies it to
+   `/usr/local/libexec/narwhal-guard` mode `0755`, fsyncs the file and parent
+   directory, and enables `narwhald-guard.timer`. It is idempotent and
+   `--dry-run` writes nothing.
 8. After trust, status key, config, and units are all valid, bootstrap writes
    `/etc/narwhal/bootstrap-complete` atomically, root-owned and not writable by
    `narwhal`. The marker is durable; neither the agent nor a state-directory
@@ -1887,9 +1900,12 @@ and controlled by the signed desired state.
 
 - The desired payload may include `agent` with `version`, `repository`,
   `digest`, and `binary_sha256`.
-- A running agent pulls the agent image by digest, extracts the binary, and
-  verifies `binary_sha256`. The digest and hash are inside the signed payload, so
-  a registry attacker cannot substitute an agent.
+- A running agent pulls the agent image by digest and verifies the manifest
+  digest, extracts `narwhald` from a tar or gzip layer, and verifies
+  `binary_sha256`. A raw binary layer uses
+  `application/vnd.narwhal.agent.binary.v1+octet-stream`. The digest and hash
+  are inside the signed payload, so a registry attacker cannot substitute an
+  agent.
 - The new binary is installed under
   `/var/lib/narwhal/agent/<version>/narwhald`. A symlink
   `/var/lib/narwhal/agent/current` is swapped atomically. The user unit starts
@@ -1898,11 +1914,17 @@ and controlled by the signed desired state.
 - The agent exits with a restart request after writing a `pending` marker. The
   user manager restarts it into the new binary.
 - The new agent writes `/var/lib/narwhal/agent/boot-ok` after one successful
-  reconcile. A small root-owned guard unit reverts `current` to the previous
+  reconcile. A root-owned system timer runs a stable guard copy at
+  `/usr/local/libexec/narwhal-guard` as `User=narwhal`. The guard command
+  (`narwhald guard --config /etc/narwhal/agent.toml`) takes only the
+  non-blocking `agent-upgrade.lock` and reverts `current` to the previous
   version if the new version does not produce `boot-ok` within 10 minutes or
-  restarts more than three times.
+  starts more than three times without it. It does not take the reconcile lock
+  and does not write `state.json`, so it cannot race a running agent. It never
+  executes `agent/current`, so a hung or pre-main binary cannot block the
+  revert.
 - On revert, the guard writes `/var/lib/narwhal/agent/reverted` with the failed
-  version, digest, and binary SHA-256. The running agent records
+  version, digest, and binary SHA-256. The next agent cycle records
   `blocked_agent_digest` and `agent_rollback_version` in `state.json`, removes
   the `pending` marker, and publishes `phase=degraded` with
   `last_error.code="agent_upgrade_failed"` and
@@ -1910,9 +1932,14 @@ and controlled by the signed desired state.
   blocked digest, the agent logs `agent_upgrade_blocked`, keeps the previous
   version, and does not retry it. A later signed generation with a different
   agent digest is eligible. Reprovisioning clears the block.
+- The `reverted` marker is durable. `boot-ok` and later healthy cycles never
+  delete it, and the agent reads it under `agent-upgrade.lock` so a guard
+  revert that races an in-flight cycle still blocks the failed digest.
 - Downgrades are not automatic. If `agent.version` is lower than the running
   version, the agent logs `agent_downgrade_refused` and keeps running. An
   operator can force a downgrade by reprovisioning, not by an inbound command.
+  Version ordering uses semver precedence; build metadata is ignored and a
+  non-semver pair falls back to ordinal comparison.
 
 ### 5.3 Offline and registry-unreachable behavior
 
@@ -2044,7 +2071,7 @@ desired state.
 | --- | --- | --- |
 | `narwhal deploy [service...] --target <name> [--dry-run] [--generation N] [--no-wait]` | Build and push images, sign and publish the desired artifact, reconcile the provider firewall, wait for signed status | Desired signing key, registry write, target config, provider firewall write |
 | `narwhal reconcile [--target <name>] [--json]` | Run one reconcile cycle locally on the host | Local agent config and state |
-| `narwhal status [--target <target_id>] [--json]` | Fetch, verify, and print signed status | Status public key, registry read |
+| `narwhal status [--target <target_id>] [--json] [--watch]` | Fetch, verify, and print signed status | Status public key, registry read |
 | `narwhal rollback [--target <name>] [--to-generation N]` | Publish a new generation from the last successfully applied payload, or an explicit verified generation, then reconcile the provider firewall | Desired signing key, registry write, provider firewall write |
 | `narwhal logs [service...] [--target <name>] [--tail N] [--follow] [--json]` | Local container logs without `--target`; remote bounded log tail with `--target` | Local podman or status read |
 | `narwhal targets` | List configured targets and their provider/region/selector/ingress | Local config |
@@ -2054,6 +2081,11 @@ desired state.
 Global options (`--json`, `--no-color`, `-v`, `--file`, `-C`) keep their current
 meaning. `--json` is supported by `deploy`, `reconcile`, `status`, `rollback`,
 `logs`, and `targets`. `--follow` is local-only.
+
+The host-local `narwhald` entrypoint adds `reconcile`, `guard`, `install-units`,
+and `install-guard`. `install-guard --system --guard-binary <path> --sha256
+<pin>` is the root bootstrap step for the stable guard copy and its system
+units; `--dry-run` prints the plan without writing.
 
 `narwhal up` is the existing local command and is not a cloud command. It keeps
 its current options and has no `--target`. `--target` is added only by the
@@ -2120,6 +2152,10 @@ separate `deploy` spec and is already present on the other cloud commands.
   `3`.
 - It never contacts the VM. An unsigned or wrongly signed status is a hard
   failure with exit `5`.
+- `--watch` re-fetches and verifies every 5 seconds. A verification failure or a
+  `failed`/`replay_rejected` phase exits `5` immediately; a registry transport
+  failure keeps watching and exits `3` if interrupted. Ctrl-C exits with the
+  last mapped code (`0`, `3`, or `5`).
 
 `narwhal rollback`:
 
@@ -2449,9 +2485,12 @@ version 0.4.0 and a matching binary SHA-256,
 When the agent stages the new binary, swaps `current`, and restarts,
 Then the 0.4.0 agent writes `boot-ok` after a successful reconcile. When a
 deliberately broken 0.5.0 binary is published and fails to write `boot-ok`, the
-root-owned guard reverts `current` to 0.4.0, records the failed digest, and the
-agent resumes serving the 0.4.0 containers and publishes `phase=degraded` with
-`blocked_agent_digest` set to the 0.5.0 binary hash and
+root-owned `narwhald-guard.timer` runs the stable `/usr/local/libexec/narwhal-guard`
+copy, which takes the non-blocking `agent-upgrade.lock`, reverts `current` to
+0.4.0 without running the broken binary, writes the `reverted` marker without
+touching `state.json`, and then the agent resumes serving
+the 0.4.0 containers and publishes `phase=degraded` with
+`blocked_agent_digest` set to the 0.5.0 binary SHA-256 as `sha256:<hex>` and
 `last_error.code="agent_upgrade_failed"`. While the desired
 artifact still names 0.5.0, the agent publishes `agent_upgrade_blocked` and does
 not retry that digest. The 0.4.0 containers stay running. A later generation
@@ -2644,6 +2683,7 @@ All sources were accessed on 2026-11-24. Version-sensitive behavior can change.
   trust/<key_id>.pub    # pinned Ed25519 desired-signing public keys
   status-key            # per-host Ed25519 private key, mode 0600
   bootstrap-complete    # root-owned first-boot marker; not writable by narwhal
+  narwhald.stage        # root-owned guard install source, verified by --sha256
   do-token              # DigitalOcean only, owner narwhal, mode 0600, optional
 
 /var/lib/narwhal/
@@ -2659,8 +2699,13 @@ All sources were accessed on 2026-11-24. Version-sensitive behavior can change.
   agent/boot-ok
   agent/pending
   agent/reverted        # failed upgrade digest, written by the guard
+  agent-upgrade.lock    # serializes staging and marker reads; guard uses non-blocking
 
 /srv/narwhal/           # only allowed root for absolute bind mounts
+
+/usr/local/libexec/narwhal-guard   # stable root-owned guard copy, never agent/current
+/etc/systemd/system/narwhald-guard.service
+/etc/systemd/system/narwhald-guard.timer
 ```
 
 User units live under `~narwhal/.config/systemd/user/`. Bootstrap enables one
@@ -2673,6 +2718,26 @@ systemctl --user enable --now narwhald-reconcile.timer
 
 The first line is daemon mode. The second is timer mode. Both run as the
 `narwhal` user and both hold `/var/lib/narwhal/lock` during a reconcile.
+
+Bootstrap installs the root-owned guard units under `/etc/systemd/system/` and
+enables the timer. The service runs the stable `/usr/local/libexec/narwhal-guard`
+copy as `User=narwhal`, never `agent/current`, so a broken agent cannot prevent
+the revert:
+
+```text
+systemctl enable --now narwhald-guard.timer
+```
+
+`narwhald install-guard --system --guard-binary <path> --sha256 <pin>` installs
+the stable guard copy and the root templates when run as root. It requires a
+root-owned, not group- or world-writable regular source and verifies the pin.
+`narwhald install-units --system-unit-dir /etc/systemd/system` writes only the
+templates. Both accept `--dry-run`, which validates and prints the plan without
+writing.
+
+An unreadable `pending`, `reverted`, or `boot-ok` marker is renamed to
+`<marker>.corrupt.<timestamp>.<random>` and ignored, so a partial write cannot
+wedge the guard.
 
 `narwhald.service` (user unit):
 
@@ -2727,6 +2792,29 @@ containers running between timer firings.
 [Timer]
 OnBootSec=30s
 OnUnitActiveSec=60s
+Persistent=true
+```
+
+`narwhald-guard.service` is a root-owned system unit run as the `narwhal` user
+from the stable guard copy, not `agent/current`:
+
+```ini
+[Unit]
+Description=narwhal agent upgrade guard
+ConditionPathExists=/usr/local/libexec/narwhal-guard
+
+[Service]
+Type=oneshot
+User=narwhal
+ExecStart=/usr/local/libexec/narwhal-guard guard --config /etc/narwhal/agent.toml
+```
+
+`narwhald-guard.timer` is a root-owned system timer:
+
+```ini
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
 Persistent=true
 ```
 

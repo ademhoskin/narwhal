@@ -42,6 +42,7 @@ public sealed class ReconcileState
     public long? BlockedGeneration { get; set; }
     public string? BlockedAgentDigest { get; set; }
     public string? AgentRollbackVersion { get; set; }
+    public string? LastAgentRevertDigest { get; set; }
     public string? LastPayloadDigest { get; set; }
     public string? LastManifestDigest { get; set; }
     public string? LastRejectedManifestDigest { get; set; }

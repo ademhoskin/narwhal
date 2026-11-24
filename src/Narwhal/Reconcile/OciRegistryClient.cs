@@ -43,6 +43,7 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
     private const string ManifestMediaType = "application/vnd.oci.image.manifest.v1+json";
     private const string DockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json";
     private const int MaxRedirects = 5;
+    public const long MaximumBlobBytes = 256L * 1024 * 1024;
 
     private readonly HttpClient _http;
     private readonly string _baseAddress;
@@ -121,7 +122,11 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
             "pull",
             acceptManifest: false,
             cancellationToken);
-        var bytes = await ReadBodyAsync(response, $"/v2/{repository}/blobs/{digest}", cancellationToken);
+        var bytes = await ReadBodyCappedAsync(
+            response,
+            $"/v2/{repository}/blobs/{digest}",
+            MaximumBlobBytes,
+            cancellationToken);
         var actual = CloudEncoding.Sha256Digest(bytes);
         if (!string.Equals(actual, digest, StringComparison.Ordinal))
             throw new CloudArtifactException(
@@ -561,6 +566,29 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
         {
             throw new RegistryException($"cannot read the registry response for {path}: {e.Message}");
         }
+    }
+
+    private static async Task<byte[]> ReadBodyCappedAsync(
+        HttpResponseMessage response,
+        string path,
+        long maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        if (response.Content.Headers.ContentLength is { } length && length > maximumBytes)
+            throw new RegistryException($"blob at {path} exceeds the {maximumBytes}-byte limit");
+
+        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+        {
+            if (buffer.Length + read > maximumBytes)
+                throw new RegistryException($"blob at {path} exceeds the {maximumBytes}-byte limit");
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
     }
 
     private static bool IsRedirect(HttpStatusCode status) => (int)status is 301 or 302 or 303 or 307 or 308;

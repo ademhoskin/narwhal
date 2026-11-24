@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 using Narwhal.Cli;
 using Narwhal.Commands;
 using Narwhal.Config;
@@ -16,6 +17,9 @@ public static class App
     public static async Task<int> Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+
+        if (NarwhaldCommand.IsNarwhaldInvocation(Environment.ProcessPath))
+            return await RunNarwhaldAsync(args);
 
         // `narwhal help [command]` is handled before parsing so it never needs a manifest.
         if (args.Length > 0 && args[0] == "help")
@@ -99,6 +103,26 @@ public static class App
         {
             return Fail(options, "error: " + e.Message, 3);
         }
+    }
+
+    private static async Task<int> RunNarwhaldAsync(string[] args)
+    {
+        using var cancellation = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
+        };
+
+        using var sigterm = OperatingSystem.IsWindows()
+            ? null
+            : PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+            {
+                context.Cancel = true;
+                cancellation.Cancel();
+            });
+
+        return await NarwhaldCommand.RunAsync(args, cancellation.Token);
     }
 
     private static async Task<int> DispatchAsync(CliOptions options, CancellationToken cancellationToken)
