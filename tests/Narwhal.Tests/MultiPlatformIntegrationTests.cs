@@ -390,6 +390,44 @@ public class MultiPlatformIntegrationTests
         Assert.Contains(Host(), up.Err);
     }
 
+    [Fact]
+    public void PushRefusesPrebuiltServices()
+    {
+        using var box = new Sandbox([Host()], extraServices: """
+            [[service]]
+            name = "db"
+            image = "docker.io/library/postgres"
+            tag = "16"
+            prebuilt = true
+            """);
+
+        // Given a prebuilt service, push refuses before touching podman.
+        var push = box.Run("push", "db");
+        Assert.Equal(1, push.Code);
+        Assert.Contains("service 'db' is prebuilt", push.Err);
+        Assert.Contains("does not push images it did not build", push.Err);
+        Assert.False(File.Exists(box.PodmanLog));
+    }
+
+    [Fact]
+    public void PushRequiresALockEntryForTheSelectedService()
+    {
+        using var box = new Sandbox([Host()], extraServices: """
+            [[service]]
+            name = "api"
+            image = "example/api"
+            tag = "latest"
+            """);
+        Assert.Equal(0, box.Run("build", "web").Code);
+
+        // Given a buildable service that was never built, push asks for a build.
+        var push = box.Run("push", "api");
+        Assert.Equal(3, push.Code);
+        Assert.Contains("'api' has no locked image", push.Err);
+        Assert.Contains("run 'narwhal build' first", push.Err);
+        Assert.DoesNotContain("push ", File.ReadAllText(box.PodmanLog));
+    }
+
     private static string Host() => NixPlatform.ContainerSystem;
 
     private static string Foreign() =>
@@ -411,7 +449,7 @@ public class MultiPlatformIntegrationTests
     {
         private readonly Dictionary<string, string?> _previous = new(StringComparer.Ordinal);
 
-        public Sandbox(IReadOnlyList<string> systems, bool directoryStorePaths = false)
+        public Sandbox(IReadOnlyList<string> systems, bool directoryStorePaths = false, string? extraServices = null)
         {
             DirectoryStorePaths = directoryStorePaths;
             DirectoryPath = Path.Combine(Path.GetTempPath(), "narwhal-tests", Guid.NewGuid().ToString("n"));
@@ -433,6 +471,9 @@ public class MultiPlatformIntegrationTests
                 image = "example/web"
                 tag = "latest"
                 """);
+
+            if (extraServices is not null)
+                File.AppendAllText(Path.Combine(DirectoryPath, "narwhal.toml"), "\n" + extraServices + "\n");
 
             Set("NARWHAL_NIX", NixPath);
             Set("NARWHAL_PODMAN", PodmanPath);

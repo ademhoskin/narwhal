@@ -6,14 +6,20 @@ test covers the scenario yet. This is a map, not an essay.
 
 Run: `nix develop -c dotnet test tests/Narwhal.Tests --nologo`
 
+The local-registry e2e is opt-in and self-skips without podman, curl, jq, or a
+pullable `registry:2` image; it may pull that image once and only serves over
+loopback:
+`NARWHAL_E2E_REGISTRY=1 nix develop -c dotnet test tests/Narwhal.Tests --nologo --filter FullyQualifiedName~LocalRegistryPushTests`,
+or directly: `nix develop -c bash tests/e2e/local-registry-push.sh`.
+
 ## Exit codes
 
 | Code | Contract | Covered by |
 | --- | --- | --- |
 | 0 | success, including "nothing to do" paths | `MultiPlatformIntegrationTests.cs::BuildsVerifiesPlansPushesAndRunsEveryConfiguredSystem` (build, plan, verify, up), `PushesWhenTheLockedStorePathIsADirectory` (build, push), `PushLeavesTheTagOnTheHostForEitherSystemOrder` (push) |
-| 1 | usage, manifest, or configuration error | `MultiPlatformIntegrationTests.cs::SelectingOneSystemBuildsAndLocksOnlyThatSystem` (unknown `--system`), `MultiPlatformIntegrationTests.cs::UpFailsWhenTheHostIsNotConfigured` (host not configured); parser/loader units cover the messages but not `App.Main` returning 1: missing manifest, invalid TOML, unknown service, unknown flag, missing option value, no command: GAP |
+| 1 | usage, manifest, or configuration error | `MultiPlatformIntegrationTests.cs::SelectingOneSystemBuildsAndLocksOnlyThatSystem` (unknown `--system`), `MultiPlatformIntegrationTests.cs::UpFailsWhenTheHostIsNotConfigured` (host not configured), `MultiPlatformIntegrationTests.cs::PushRefusesPrebuiltServices` (prebuilt push); parser/loader units cover the messages but not `App.Main` returning 1: missing manifest, invalid TOML, unknown service, unknown flag, missing option value, no command: GAP |
 | 2 | build failure (`BuildException`) | GAP (no test drives a failing nix build through `App.Main`) |
-| 3 | podman/tool/process failure | `MultiPlatformIntegrationTests.cs::DriftedLockImageIdBlocksPushBeforeAnyPush`, `MultiPlatformIntegrationTests.cs::StaleLockAttrBlocksPush`, `MultiPlatformIntegrationTests.cs::RestoreFailureDoesNotMaskTheOriginalPushFailure`; missing container and missing tool: GAP |
+| 3 | podman/tool/process failure | `MultiPlatformIntegrationTests.cs::DriftedLockImageIdBlocksPushBeforeAnyPush`, `MultiPlatformIntegrationTests.cs::StaleLockAttrBlocksPush`, `MultiPlatformIntegrationTests.cs::RestoreFailureDoesNotMaskTheOriginalPushFailure`, `MultiPlatformIntegrationTests.cs::PushRequiresALockEntryForTheSelectedService`; missing container and missing tool: GAP |
 | 4 | reproducibility mismatch | `MultiPlatformIntegrationTests.cs::LockedBuildReportsEveryMissingAndDriftingPlatform`, `MultiPlatformIntegrationTests.cs::VerifyReportsDriftForOnePlatform`; missing lock: GAP |
 | 130 | interrupted (Ctrl-C / cancellation) | GAP |
 
@@ -110,6 +116,8 @@ Run: `nix develop -c dotnet test tests/Narwhal.Tests --nologo`
 | --- | --- | --- |
 | single platform | Given a lock for one selected foreign system; When push; Then that locked image id is pushed by id, not by tag | `MultiPlatformIntegrationTests.cs::PushingOneSelectedSystemPushesThatPlatformsImageId` |
 | multi-arch index | Given two systems; When push; Then an empty index is created under a dedicated name, both ids added, pushed `--all --rm`, then removed | `MultiPlatformIntegrationTests.cs::BuildsVerifiesPlansPushesAndRunsEveryConfiguredSystem` |
+| live registry index | Given two built platforms and a real local registry; When push; Then the remote tag is an OCI index with two entries whose config digests are the locked ids and whose platforms are amd64 and arm64 | `LocalRegistryPushTests.cs::LocalRegistryPushPublishesATwoEntryOciIndex` (opt-in: `NARWHAL_E2E_REGISTRY=1`) |
+| seeded remote replaced | Given a pre-existing remote manifest list built from different images; When push and then re-push; Then the tag's `Docker-Content-Digest` differs from the seed digest each time, its entries are the freshly built images, and the local tag stays on the host image | `LocalRegistryPushTests.cs::LocalRegistryPushPublishesATwoEntryOciIndex` (opt-in: `NARWHAL_E2E_REGISTRY=1`) |
 | directory store | Given the locked store path is a directory; When push; Then the contained archive is read and pushed | `MultiPlatformIntegrationTests.cs::PushesWhenTheLockedStorePathIsADirectory` |
 | host tag restoration | Given either system order; When push; Then the local tag ends on the host image | `MultiPlatformIntegrationTests.cs::PushLeavesTheTagOnTheHostForEitherSystemOrder` |
 | stale host attr | Given a host entry whose attr no longer matches; When foreign push; Then the previous tag is restored with a warning | `MultiPlatformIntegrationTests.cs::StaleHostAttrFallsBackToThePreviousTag` |
@@ -120,8 +128,8 @@ Run: `nix develop -c dotnet test tests/Narwhal.Tests --nologo`
 | multi-arch archived fallback | Given both archives are gone but both ids are loaded; When push; Then both ids make the index | `MultiPlatformIntegrationTests.cs::MultiPlatformPushFallsBackToLoadedLockedIds` |
 | stale index cleared | Given a leftover index with a stale platform; When push; Then the index is rebuilt from empty | `MultiPlatformIntegrationTests.cs::PushClearsStaleManifestEntries` |
 | restore failure | Given push and tag restore both fail; When push; Then exit 3 and the original push error survives | `MultiPlatformIntegrationTests.cs::RestoreFailureDoesNotMaskTheOriginalPushFailure` |
-| prebuilt refusal | Given `push db` where `db` is prebuilt; When push; Then exit 1 | GAP |
-| missing lock entry | Given no lock entry for a selected service; When push; Then exit 3 suggests `narwhal build` | GAP |
+| prebuilt refusal | Given `push db` where `db` is prebuilt; When push; Then exit 1 with "does not push images it did not build" and no podman call | `MultiPlatformIntegrationTests.cs::PushRefusesPrebuiltServices` |
+| missing lock entry | Given no lock entry for a selected service; When push; Then exit 3 suggests `narwhal build` | `MultiPlatformIntegrationTests.cs::PushRequiresALockEntryForTheSelectedService` |
 
 ## verify
 
@@ -202,11 +210,10 @@ Command-level gaps (no `App.Main` acceptance test):
 5. `down`: all scenarios.
 6. `ps`: human and JSON output.
 7. `logs`: missing container, unknown service, podman argument forwarding.
-8. `push`: prebuilt refusal, missing lock entry.
-9. `verify`: missing lock, missing platform row, build failure row, manifest-changed warning, `--json`.
-10. `version` and `help <command>` output.
-11. Global: missing manifest, invalid TOML through the CLI, unknown service, no command, `--file`, `--lock`, missing `-C`, `--json` error envelope, `--verbose`.
-12. Exit codes with no end-to-end test: 2 (build failure), 130 (interrupt), 3 for missing tool/container.
-13. JSON shapes not asserted: `build`, `verify`, `up`, `down`, `ps`, error envelope; `version --json` is plain text by design.
+8. `verify`: missing lock, missing platform row, build failure row, manifest-changed warning, `--json`.
+9. `version` and `help <command>` output.
+10. Global: missing manifest, invalid TOML through the CLI, unknown service, no command, `--file`, `--lock`, missing `-C`, `--json` error envelope, `--verbose`.
+11. Exit codes with no end-to-end test: 2 (build failure), 130 (interrupt), 3 for missing tool/container.
+12. JSON shapes not asserted: `build`, `verify`, `up`, `down`, `ps`, error envelope; `version --json` is plain text by design.
 
-Out of scope this round: fake-harness extraction, local-registry e2e, remaining push edge cases, cloud work.
+Out of scope this round: fake-harness extraction, cloud work.
