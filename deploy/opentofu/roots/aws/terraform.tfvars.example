@@ -1,0 +1,24 @@
+project     = "example"
+target_name = "prod"
+region      = "us-east-1"
+
+trust_keys = {
+  "operator-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+}
+
+status_keys = {
+  "host-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+}
+
+# Existing SSM SecureString parameter holding the per-host Ed25519 status key.
+status_key_secret = "arn:aws:ssm:us-east-1:111122223333:parameter/narwhal/example/prod/status-key"
+
+agent_image         = "111122223333.dkr.ecr.us-east-1.amazonaws.com/example/narwhald"
+agent_digest        = "sha256:REPLACE_WITH_64_HEX_CHARACTERS"
+agent_binary_sha256 = "REPLACE_WITH_64_HEX_CHARACTERS"
+agent_mode          = "daemon"
+
+service_images = ["api"]
+
+enable_ssm_association      = false
+enable_cloudwatch_log_group = false

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Idempotent host preparation for one narwhal target.
+# Runs once as cloud-init user-data on AWS and DigitalOcean, and on every boot
+# as a GCP startup script. Re-running it must not rewrite unchanged files.
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+if ! dpkg -s podman >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y --no-install-recommends ${packages}
+fi
+
+if ! id -u narwhal >/dev/null 2>&1; then
+  adduser --system --group --home /var/lib/narwhal --shell /usr/sbin/nologin narwhal
+fi
+
+if ! grep -q '^narwhal:' /etc/subuid; then
+  printf '%s\n' 'narwhal:100000:65536' >> /etc/subuid
+fi
+if ! grep -q '^narwhal:' /etc/subgid; then
+  printf '%s\n' 'narwhal:100000:65536' >> /etc/subgid
+fi
+
+install -d -m 0755 -o root -g root /etc/narwhal
+install -d -m 0755 -o root -g root /etc/narwhal/trust
+install -d -m 0750 -o narwhal -g narwhal /var/lib/narwhal
+install -d -m 0750 -o narwhal -g narwhal /srv/narwhal
+
+write_if_changed() {
+  dest=$1
+  mode=$2
+  owner=$3
+  tmp=$(mktemp "$(dirname "$dest")/.narwhal.XXXXXX")
+  cat > "$tmp"
+  chown "$owner" "$tmp"
+  chmod "$mode" "$tmp"
+  if cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"
+  else
+    mv -f "$tmp" "$dest"
+  fi
+}
+
+write_if_changed /etc/narwhal/bootstrap.json 0644 root:root <<'NARWHAL_BOOTSTRAP_JSON'
+${bootstrap_json}
+NARWHAL_BOOTSTRAP_JSON
+%{ for id, key in trust_keys ~}
+write_if_changed /etc/narwhal/trust/${id}.pub 0644 root:root <<'NARWHAL_TRUST_KEY'
+${key}
+NARWHAL_TRUST_KEY
+%{ endfor ~}
+%{ for file in extra_files ~}
+write_if_changed "${file.path}" ${file.mode} ${file.owner}:${file.group} <<'NARWHAL_EXTRA_FILE'
+${file.content}
+NARWHAL_EXTRA_FILE
+%{ endfor ~}
+
+loginctl enable-linger narwhal
+systemctl start "user@$(id -u narwhal).service"

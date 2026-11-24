@@ -1,0 +1,25 @@
+project     = "example"
+target_name = "prod"
+gcp_project = "example-project-123456"
+region      = "us-central1"
+
+trust_keys = {
+  "operator-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+}
+
+status_keys = {
+  "host-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+}
+
+status_key_secret_id = "narwhal-example-prod-status-key"
+
+agent_image         = "us-central1-docker.pkg.dev/example-project-123456/narwhal-images/example/narwhald"
+agent_digest        = "sha256:REPLACE_WITH_64_HEX_CHARACTERS"
+agent_binary_sha256 = "REPLACE_WITH_64_HEX_CHARACTERS"
+agent_mode          = "daemon"
+
+service_images = ["api"]
+
+enable_static_address = false
+enable_logging_sink   = false
+log_sink_destination  = ""

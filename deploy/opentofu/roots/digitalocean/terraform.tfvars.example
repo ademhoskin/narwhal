@@ -1,0 +1,31 @@
+project     = "example"
+target_name = "prod"
+region      = "nyc3"
+
+trust_keys = {
+  "operator-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+}
+
+status_keys = {
+  "host-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+}
+
+status_key_secret_name = "narwhal-example-prod-status-key"
+
+# bootstrap_token is intentionally not stored here. Set TOFU_VAR_bootstrap_token
+# in the environment with a least-privilege token (secret:read and image pull).
+
+# State must not live in DOCR. Use a separate registry account or endpoint.
+state_registry = "ghcr.io"
+state_registry_credential_secret_name = "narwhal-example-prod-state-registry"
+
+agent_image         = "registry.digitalocean.com/example/narwhald"
+agent_digest        = "sha256:REPLACE_WITH_64_HEX_CHARACTERS"
+agent_binary_sha256 = "REPLACE_WITH_64_HEX_CHARACTERS"
+agent_mode          = "daemon"
+
+service_images = ["api"]
+
+enable_reserved_ip   = false
+enable_monitor_alert = false
+alert_emails         = []
