@@ -1,24 +1,29 @@
 {
-  "version": 1,
+  "version": 2,
   "narwhal": "0.1.0",
   "manifest_sha256": "69c031af5dd255ac20e4a0a13ae599f576d76d80735688de54c4f0753ace37e2",
   "flakes": {
     ".": {
       "url": "git+file:///home/dreadheadcoder/workplace/narwhal?dir=examples/hello",
-      "nar_hash": "sha256-/DOMX+p1iuZIs8lHHa26RbPib/y7T86/zAme3AI4s98=",
-      "revision": "4b6a69196f68d6ab73445698dfdae8365bb49007-dirty",
-      "last_modified": "1795143875"
+      "nar_hash": "sha256-KSIyXu5NvipZ2mkcCwmncNr4Y4pHOy+GD/5Ik6+H/Kg=",
+      "revision": "28e8adfea1fa6324861fa81ad490f3c374448dbc",
+      "last_modified": "1795548598"
     }
   },
   "services": {
     "web": {
-      "attr": "narwhal.images.x86_64-linux.web",
       "flake": ".",
       "image": "narwhal-example/web",
       "tag": "latest",
-      "store_path": "/nix/store/1kk56xsmpgakbpz5byywzwsf3c9gym03-web.tar.gz",
-      "nar_hash": "sha256-h3sxKNPO3VG2wOtz68PHfFFu8B21+7Y2OayTii33HEo=",
-      "image_id": "84b6d144e22d31525b453965399be530d03b0d9f0ade75a45d6d9a27b359c7b9"
+      "platforms": {
+        "x86_64-linux": {
+          "platform": "linux/amd64",
+          "attr": "narwhal.images.x86_64-linux.web",
+          "store_path": "/nix/store/1kk56xsmpgakbpz5byywzwsf3c9gym03-web.tar.gz",
+          "nar_hash": "sha256-h3sxKNPO3VG2wOtz68PHfFFu8B21+7Y2OayTii33HEo=",
+          "image_id": "sha256:84b6d144e22d31525b453965399be530d03b0d9f0ade75a45d6d9a27b359c7b9"
+        }
+      }
     }
   }
 }

@@ -58,10 +58,16 @@ public sealed class BuildOptions
     public string AttrPrefix { get; init; } = "narwhal.images";
 
     /// <summary>
-    /// System whose images to build. Defaults to the current architecture with a
-    /// linux OS, since that is what containers run.
+    /// Nix systems to build images for, in manifest order. Defaults to the current
+    /// architecture with a linux OS, since that is what containers run.
     /// </summary>
-    public string System { get; init; } = NixPlatform.ContainerSystem;
+    public IReadOnlyList<string> Systems { get; init; } = [NixPlatform.ContainerSystem];
+
+    /// <summary>The host system when configured, otherwise the first configured system.</summary>
+    public string PrimarySystem =>
+        Systems.Contains(NixPlatform.ContainerSystem, StringComparer.Ordinal)
+            ? NixPlatform.ContainerSystem
+            : Systems[0];
 
     /// <summary>Extra arguments appended to every <c>nix build</c> invocation.</summary>
     public List<string> ExtraArgs { get; init; } = [];
@@ -116,8 +122,26 @@ public sealed class ServiceSpec
 
     public string Repository(Manifest manifest) => Image ?? $"{manifest.Name}/{Name}";
     public string Reference(Manifest manifest) => $"{Repository(manifest)}:{Tag}";
-    public string AttrPath(Manifest manifest) =>
-        Attr ?? $"{manifest.Build.AttrPrefix}.{manifest.Build.System}.{Name}";
+
+    /// <summary>Flake attribute for <paramref name="system"/>; <c>{system}</c> is substituted in an explicit attr.</summary>
+    public string AttrPath(Manifest manifest, string system)
+    {
+        if (Attr is not { } attr)
+            return $"{manifest.Build.AttrPrefix}.{system}.{Name}";
+
+        if (attr.Contains("{system}", StringComparison.Ordinal))
+            return attr.Replace("{system}", system, StringComparison.Ordinal);
+
+        if (manifest.Build.Systems.Count > 1)
+            throw new ManifestException(
+                $"service '{Name}' has attr '{attr}' without '{{system}}' but the manifest builds {manifest.Build.Systems.Count} systems; add '{{system}}' to the attr");
+
+        return attr;
+    }
+
+    /// <summary>Flake attribute for the manifest's primary system.</summary>
+    public string AttrPath(Manifest manifest) => AttrPath(manifest, manifest.Build.PrimarySystem);
+
     public string FlakeRef(Manifest manifest) => Flake ?? manifest.Flake;
     public string RestartPolicy(Manifest manifest) => Restart ?? manifest.Deploy.Restart;
 }
@@ -127,6 +151,37 @@ public sealed class ManifestException(string message) : Exception(message);
 /// <summary>Nix system strings for the machine narwhal runs on.</summary>
 public static class NixPlatform
 {
+    private static readonly IReadOnlyDictionary<string, string> OciPlatforms =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["x86_64-linux"] = "linux/amd64",
+            ["aarch64-linux"] = "linux/arm64",
+            ["i686-linux"] = "linux/386",
+            ["armv7l-linux"] = "linux/arm/v7",
+            ["riscv64-linux"] = "linux/riscv64",
+            ["ppc64le-linux"] = "linux/ppc64le",
+            ["s390x-linux"] = "linux/s390x",
+        };
+
+    /// <summary>Nix systems narwhal can build images for, in stable order.</summary>
+    public static IReadOnlyCollection<string> SupportedSystems => OciPlatforms.Keys.ToArray();
+
+    /// <summary>Comma-separated supported systems, for error messages.</summary>
+    public static string SupportedSystemsHint => string.Join(", ", OciPlatforms.Keys);
+
+    /// <summary>Map a Nix system to its OCI platform string.</summary>
+    /// <exception cref="ManifestException">The system is not one of <see cref="SupportedSystems"/>.</exception>
+    public static string ToOciPlatform(string system)
+    {
+        if (OciPlatforms.TryGetValue(system, out var platform))
+            return platform;
+
+        throw new ManifestException(
+            $"unsupported nix system '{system}'; supported systems: {SupportedSystemsHint}");
+    }
+
+    public static bool IsSupported(string system) => OciPlatforms.ContainsKey(system);
+
     public static string ContainerSystem
     {
         get

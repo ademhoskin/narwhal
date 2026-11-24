@@ -21,6 +21,8 @@ public sealed class CommandContext
 
     public string Network => Manifest.Deploy.Network ?? PodmanClient.DefaultNetwork(Manifest.Name);
 
+    public string HostSystem => NixPlatform.ContainerSystem;
+
     public static CommandContext Create(CliOptions options)
     {
         var directory = options.Directory ?? Environment.CurrentDirectory;
@@ -66,6 +68,26 @@ public sealed class CommandContext
     }
 
     public string ContainerName(ServiceSpec service) => PodmanClient.ContainerName(Manifest.Name, service.Name);
+
+    /// <summary>Configured systems, or the subset named by repeated <c>--system</c> flags.</summary>
+    public IReadOnlyList<string> SelectSystems(CliOptions options)
+    {
+        var requested = options.ListValue("system");
+        if (requested.Count == 0)
+            return Manifest.Build.Systems;
+
+        var selected = new List<string>();
+        foreach (var system in requested)
+        {
+            if (!Manifest.Build.Systems.Contains(system, StringComparer.Ordinal))
+                throw new UsageException(
+                    $"system '{system}' is not configured in {Path.GetFileName(Manifest.Path)}; configured systems: {string.Join(", ", Manifest.Build.Systems)}");
+            if (!selected.Contains(system, StringComparer.Ordinal))
+                selected.Add(system);
+        }
+
+        return selected;
+    }
 }
 
 public sealed class ReproducibilityException(string message) : Exception(message);

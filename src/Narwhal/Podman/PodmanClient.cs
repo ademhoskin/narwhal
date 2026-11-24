@@ -55,40 +55,36 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
     /// <summary>Load a docker-archive tarball and return the resulting image id.</summary>
     public async Task<string> LoadImageAsync(string artifactPath, string reference, CancellationToken cancellationToken)
     {
-        await runner.RunAsync(Executable, ["load", "-i", artifactPath],
+        var result = await runner.RunAsync(Executable, ["load", "-i", artifactPath],
             new ProcessOptions { Check = true, Stream = true }, cancellationToken);
 
-        var id = await ImageIdAsync(reference, cancellationToken);
-        if (id is null)
+        var (loadedName, loadedId) = ParseLoadOutput(result.StdOut);
+        var source = loadedName ?? loadedId;
+        if (source is not null && NormalizeReference(source) != reference)
+            await runner.RunAsync(Executable, ["tag", source, reference],
+                new ProcessOptions { Check = true }, cancellationToken);
+
+        return await ImageIdAsync(reference, cancellationToken)
+            ?? throw new PodmanException($"image '{reference}' was loaded but has no inspectable id");
+    }
+
+    private static (string? Name, string? Id) ParseLoadOutput(string stdout)
+    {
+        string? name = null;
+        string? id = null;
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            // Nix sets the repository name inside the archive; if the manifest's
-            // reference differs, tag it explicitly so later commands can use it.
-            await TagAsync(artifactPath, reference, cancellationToken);
-            id = await ImageIdAsync(reference, cancellationToken)
-                ?? throw new PodmanException($"image '{reference}' was loaded but has no inspectable id");
+            if (line.StartsWith("Loaded image ID:", StringComparison.OrdinalIgnoreCase))
+                id = line["Loaded image ID:".Length..].Trim();
+            else if (line.StartsWith("Loaded image:", StringComparison.OrdinalIgnoreCase))
+                name = line["Loaded image:".Length..].Trim();
         }
 
-        return id;
+        return (name, id);
     }
 
-    private async Task TagAsync(string artifactPath, string reference, CancellationToken cancellationToken)
-    {
-        // `podman load` prints the loaded name; use the image id from the tarball.
-        var idResult = await runner.RunAsync(Executable, ["load", "-i", artifactPath],
-            new ProcessOptions(), cancellationToken);
-        var loaded = idResult.StdOut
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .FirstOrDefault(line => line.Contains("Loaded image", StringComparison.OrdinalIgnoreCase));
-
-        if (loaded is null)
-            return;
-
-        var name = loaded[(loaded.LastIndexOf(' ') + 1)..].Trim();
-        var withoutDigest = name.Split('@')[0];
-        if (withoutDigest.Length > 0 && withoutDigest != reference)
-            await runner.RunAsync(Executable, ["tag", withoutDigest, reference],
-                new ProcessOptions { Check = true }, cancellationToken);
-    }
+    private static string NormalizeReference(string reference) =>
+        reference.Split('@')[0].Replace("docker.io/", "", StringComparison.Ordinal);
 
     public async Task<string?> ImageIdAsync(string reference, CancellationToken cancellationToken)
     {
@@ -245,11 +241,52 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
         await runner.RunAsync(Executable, args, new ProcessOptions { Raw = true }, cancellationToken);
     }
 
-    public async Task PushAsync(string reference, CancellationToken cancellationToken)
+    /// <summary>Push a specific local image id to a destination reference.</summary>
+    public async Task PushByIdAsync(string imageId, string destination, CancellationToken cancellationToken)
     {
-        reporter.Step($"pushing {reference}");
-        await runner.RunAsync(Executable, ["push", reference],
+        reporter.Step($"pushing {destination}");
+        await runner.RunAsync(Executable, ["push", imageId, $"docker://{destination}"],
             new ProcessOptions { Check = true, Stream = true }, cancellationToken);
+    }
+
+    /// <summary>Tag a local image id, replacing any existing owner of the tag.</summary>
+    public async Task TagAsync(string imageId, string reference, CancellationToken cancellationToken)
+    {
+        await runner.RunAsync(Executable, ["tag", imageId, reference],
+            new ProcessOptions { Check = true }, cancellationToken);
+    }
+
+    /// <summary>Create or amend a local manifest list and add each image id to it.</summary>
+    public async Task CreateManifestAsync(string reference, IReadOnlyList<string> imageIds,
+        CancellationToken cancellationToken)
+    {
+        reporter.Step($"creating multi-platform manifest {reference}");
+        await runner.RunAsync(Executable, ["manifest", "create", "--amend", reference],
+            new ProcessOptions { Check = true }, cancellationToken);
+
+        if (imageIds.Count > 0)
+        {
+            var args = new List<string> { "manifest", "add", reference };
+            args.AddRange(imageIds);
+            await runner.RunAsync(Executable, args,
+                new ProcessOptions { Check = true }, cancellationToken);
+        }
+    }
+
+    /// <summary>Push every platform in a manifest list and remove the local list on success.</summary>
+    public async Task PushManifestAsync(string index, string destination, CancellationToken cancellationToken)
+    {
+        reporter.Step($"pushing multi-platform manifest {destination}");
+        await runner.RunAsync(Executable,
+            ["manifest", "push", "--all", "--rm", index, $"docker://{destination}"],
+            new ProcessOptions { Check = true, Stream = true }, cancellationToken);
+    }
+
+    /// <summary>Remove a local manifest list; a missing list is not an error.</summary>
+    public async Task RemoveManifestAsync(string reference, CancellationToken cancellationToken)
+    {
+        await runner.RunAsync(Executable, ["manifest", "rm", reference],
+            new ProcessOptions(), cancellationToken);
     }
 
     public async Task<IReadOnlyList<string>> ProjectVolumesAsync(string project, CancellationToken cancellationToken)

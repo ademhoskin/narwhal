@@ -24,7 +24,7 @@ public class ManifestTests
 
             [build]
             attr_prefix = "images"
-            system = "aarch64-linux"
+            systems = ["aarch64-linux"]
 
             [deploy]
             network = "acme-net"
@@ -222,5 +222,174 @@ public class ManifestTests
         Directory.CreateDirectory(nested);
 
         Assert.Equal(path, ManifestLoader.Discover(nested));
+    }
+
+    [Fact]
+    public void ParsesMultipleSystemsInOrder()
+    {
+        var manifest = Load("""
+            name = "multi"
+
+            [build]
+            systems = ["x86_64-linux", "aarch64-linux"]
+
+            [[service]]
+            name = "api"
+            """);
+
+        Assert.Equal(["x86_64-linux", "aarch64-linux"], manifest.Build.Systems);
+        Assert.Equal(
+            manifest.Build.Systems.Contains(NixPlatform.ContainerSystem, StringComparer.Ordinal)
+                ? NixPlatform.ContainerSystem
+                : "x86_64-linux",
+            manifest.Build.PrimarySystem);
+        Assert.Equal("narwhal.images.aarch64-linux.api", manifest.Services[0].AttrPath(manifest, "aarch64-linux"));
+    }
+
+    [Fact]
+    public void DefaultsSystemsToTheHost()
+    {
+        var manifest = Load("""
+            name = "host"
+
+            [[service]]
+            name = "api"
+            """);
+
+        Assert.Equal([NixPlatform.ContainerSystem], manifest.Build.Systems);
+    }
+
+    [Fact]
+    public void RejectsTheLegacySystemKey()
+    {
+        var error = Assert.Throws<ManifestException>(() => Load("""
+            name = "both"
+
+            [build]
+            system = "x86_64-linux"
+
+            [[service]]
+            name = "api"
+            """));
+
+        Assert.Contains("build.system is not supported", error.Message);
+        Assert.Contains("systems", error.Message);
+    }
+
+    [Fact]
+    public void RejectsDuplicateSystems()
+    {
+        var error = Assert.Throws<ManifestException>(() => Load("""
+            name = "dupe"
+
+            [build]
+            systems = ["x86_64-linux", "x86_64-linux"]
+
+            [[service]]
+            name = "api"
+            """));
+
+        Assert.Contains("more than once", error.Message);
+    }
+
+    [Fact]
+    public void RejectsEmptySystems()
+    {
+        var error = Assert.Throws<ManifestException>(() => Load("""
+            name = "empty-systems"
+
+            [build]
+            systems = []
+
+            [[service]]
+            name = "api"
+            """));
+
+        Assert.Contains("at least one system", error.Message);
+    }
+
+    [Fact]
+    public void RejectsUnsupportedSystemsWithTheSupportedList()
+    {
+        var error = Assert.Throws<ManifestException>(() => Load("""
+            name = "unsupported"
+
+            [build]
+            systems = ["mips-linux"]
+
+            [[service]]
+            name = "api"
+            """));
+
+        Assert.Contains("unsupported system 'mips-linux'", error.Message);
+        Assert.Contains("x86_64-linux", error.Message);
+        Assert.Contains("aarch64-linux", error.Message);
+    }
+
+    [Fact]
+    public void SubstitutesSystemInAnExplicitAttr()
+    {
+        var manifest = Load("""
+            name = "attrs"
+
+            [build]
+            systems = ["x86_64-linux", "i686-linux"]
+
+            [[service]]
+            name = "web"
+            attr = "images.{system}.web"
+            """);
+
+        var web = manifest.Services[0];
+        Assert.Equal("images.x86_64-linux.web", web.AttrPath(manifest, "x86_64-linux"));
+        Assert.Equal("images.i686-linux.web", web.AttrPath(manifest, "i686-linux"));
+    }
+
+    [Fact]
+    public void AllowsAPlainAttrForOneSystem()
+    {
+        var manifest = Load("""
+            name = "plain"
+
+            [build]
+            systems = ["x86_64-linux"]
+
+            [[service]]
+            name = "web"
+            attr = "images.web"
+            """);
+
+        Assert.Equal("images.web", manifest.Services[0].AttrPath(manifest, "x86_64-linux"));
+    }
+
+    [Fact]
+    public void RejectsAPlainAttrWithMultipleSystems()
+    {
+        var manifest = Load("""
+            name = "plain-multi"
+
+            [build]
+            systems = ["x86_64-linux", "i686-linux"]
+
+            [[service]]
+            name = "web"
+            attr = "images.web"
+            """);
+
+        var error = Assert.Throws<ManifestException>(() => manifest.Services[0].AttrPath(manifest, "i686-linux"));
+        Assert.Contains("{system}", error.Message);
+    }
+
+    [Theory]
+    [InlineData("x86_64-linux", "linux/amd64")]
+    [InlineData("aarch64-linux", "linux/arm64")]
+    [InlineData("i686-linux", "linux/386")]
+    [InlineData("armv7l-linux", "linux/arm/v7")]
+    [InlineData("riscv64-linux", "linux/riscv64")]
+    [InlineData("ppc64le-linux", "linux/ppc64le")]
+    [InlineData("s390x-linux", "linux/s390x")]
+    public void MapsNixSystemsToOciPlatforms(string system, string platform)
+    {
+        Assert.Equal(platform, NixPlatform.ToOciPlatform(system));
     }
 }

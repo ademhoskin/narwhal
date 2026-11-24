@@ -4,7 +4,13 @@ using Narwhal.Config;
 
 namespace Narwhal.Nix;
 
-public sealed record BuiltImage(string Attr, string StorePath, string ArtifactPath, string NarHash);
+public sealed record BuiltImage(
+    string System,
+    string OciPlatform,
+    string Attr,
+    string StorePath,
+    string ArtifactPath,
+    string NarHash);
 
 public sealed record FlakeMetadata(string Url, string? NarHash, string? Revision, string? LastModified);
 
@@ -16,10 +22,11 @@ public sealed class NixClient(ProcessRunner runner, Reporter reporter)
 
     public string Executable => Environment.GetEnvironmentVariable("NARWHAL_NIX") ?? "nix";
 
-    public async Task<BuiltImage> BuildImageAsync(Manifest manifest, ServiceSpec service,
+    public async Task<BuiltImage> BuildImageAsync(Manifest manifest, ServiceSpec service, string system,
         CancellationToken cancellationToken, bool rebuild = false)
     {
-        var attr = service.AttrPath(manifest);
+        var attr = service.AttrPath(manifest, system);
+        var ociPlatform = NixPlatform.ToOciPlatform(system);
         var flakeRef = ResolveFlakeRef(manifest, service.FlakeRef(manifest));
         var installable = $"{flakeRef}#{attr}";
 
@@ -32,7 +39,7 @@ public sealed class NixClient(ProcessRunner runner, Reporter reporter)
         args.AddRange(manifest.Build.ExtraArgs);
         args.Add(installable);
 
-        reporter.Step($"building {service.Name} ({attr})");
+        reporter.Step($"building {service.Name} for {system} ({attr})");
         var result = await runner.RunAsync(Executable, args, new ProcessOptions
         {
             WorkingDirectory = manifest.Directory,
@@ -41,15 +48,18 @@ public sealed class NixClient(ProcessRunner runner, Reporter reporter)
 
         if (!result.Ok)
         {
+            var hint = system != NixPlatform.ContainerSystem
+                ? $"\nbuilding for {system} needs a builder or emulator for that system; configure a remote builder or binfmt"
+                : "";
             throw new BuildException(
-                $"nix build failed for '{service.Name}' ({installable})",
-                $"{result.Combined.TrimEnd()}");
+                $"nix build failed for '{service.Name}' for {system} ({installable})",
+                $"{result.Combined.TrimEnd()}{hint}");
         }
 
         var storePath = ParseBuildOutput(result.StdOut, installable);
         var narHash = await NarHashAsync(manifest, storePath, cancellationToken);
         var artifact = ResolveArtifact(storePath);
-        return new BuiltImage(attr, storePath, artifact, narHash);
+        return new BuiltImage(system, ociPlatform, attr, storePath, artifact, narHash);
     }
 
     public async Task<FlakeMetadata> MetadataAsync(string flakeRef, string workingDirectory,

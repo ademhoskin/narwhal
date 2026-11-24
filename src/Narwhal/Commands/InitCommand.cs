@@ -62,6 +62,9 @@ public static class InitCommand
 
         [build]
         attr_prefix = "narwhal.images"
+        # Build one image per system (default: the host). Add an explicit attr
+        # containing {system} to a service when its attribute path differs.
+        # systems = ["x86_64-linux", "aarch64-linux"]
 
         [deploy]
         restart = "unless-stopped"

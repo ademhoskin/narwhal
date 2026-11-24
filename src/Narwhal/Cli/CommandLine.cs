@@ -17,6 +17,7 @@ public sealed class CliOptions
     public string Command { get; set; } = "";
     public List<string> Positionals { get; } = [];
     public Dictionary<string, string> Values { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, List<string>> ValueLists { get; } = new(StringComparer.Ordinal);
     public HashSet<string> Flags { get; } = new(StringComparer.Ordinal);
 
     public bool Json { get; set; }
@@ -29,6 +30,10 @@ public sealed class CliOptions
     public string? LockPath { get; set; }
 
     public string? Value(string name) => Values.TryGetValue(name, out var value) ? value : null;
+
+    /// <summary>Every value given for a repeatable option, in order.</summary>
+    public IReadOnlyList<string> ListValue(string name) =>
+        ValueLists.TryGetValue(name, out var values) ? values : [];
 
     public int? IntValue(string name, int min = 0, int max = int.MaxValue)
     {
@@ -53,8 +58,8 @@ public static class CommandLine
         new("plan", "show services, build targets and lock status",
             "narwhal plan", [], ["refresh"]),
         new("build", "build images with nix and load them into podman",
-            "narwhal build [service...] [--locked] [--no-load] [--rebuild]",
-            [], ["locked", "frozen", "no-load", "rebuild"]),
+            "narwhal build [service...] [--system <system>]... [--locked] [--no-load] [--rebuild]",
+            ["system"], ["locked", "frozen", "no-load", "rebuild"]),
         new("up", "build images and start the service container",
             "narwhal up [service...] [--build] [--no-build] [--wait <seconds>]",
             ["wait"], ["build", "no-build"]),
@@ -67,9 +72,9 @@ public static class CommandLine
             "narwhal logs [service...] [--follow] [--tail <lines>] [--timestamps]",
             ["tail"], ["follow", "timestamps"]),
         new("push", "push built images to their registries",
-            "narwhal push [service...]", [], []),
+            "narwhal push [service...] [--system <system>]...", ["system"], []),
         new("verify", "rebuild and prove images match the lock file",
-            "narwhal verify [service...] [--no-load]", [], ["no-load"]),
+            "narwhal verify [service...] [--system <system>]... [--no-load]", ["system"], ["no-load"]),
         new("version", "print the narwhal version", "narwhal version", [], []),
     ];
 
@@ -147,7 +152,11 @@ public static class CommandLine
 
                 if (spec.ValueOptions.Contains(commandOption))
                 {
-                    options.Values[commandOption] = inlineValue ?? RequireValue(args, ref index, "--" + commandOption);
+                    var value = inlineValue ?? RequireValue(args, ref index, "--" + commandOption);
+                    options.Values[commandOption] = value;
+                    if (!options.ValueLists.TryGetValue(commandOption, out var values))
+                        options.ValueLists[commandOption] = values = [];
+                    values.Add(value);
                     if (inlineValue is not null)
                         index++;
                     continue;

@@ -51,7 +51,7 @@ narwhal down
 ```
 
 `narwhal init` writes a manifest with one service and a flake that builds it with
-`narwhal.lib.<system>.mkHttpImage`.
+`narwhal.lib.<system>.mkHelloImage`.
 
 ## The service container
 
@@ -61,7 +61,7 @@ flake = "."              # flake that provides the images
 
 [build]
 attr_prefix = "narwhal.images"   # image set lives at <prefix>.<system>.<service>
-system = "x86_64-linux"          # optional; defaults to the current arch + linux
+systems = ["x86_64-linux"]       # optional; defaults to the current arch + linux
 
 [deploy]
 network = "shop"                 # optional; default narwhal-<project>
@@ -72,7 +72,7 @@ wait_seconds = 60                # how long to wait for a dependency
 name = "api"                     # required, unique
 image = "registry.example.com/shop/api"   # default <project>/<service>
 tag = "latest"
-attr = "narwhal.images.x86_64-linux.api"  # optional; overrides attr_prefix
+attr = "narwhal.images.{system}.api"      # optional; {system} is required with several systems
 flake = "."                      # optional per-service flake (multi-repo)
 ports = ["8080:8080", "9090:9090/udp"]
 env = { LOG_LEVEL = "info" }
@@ -152,21 +152,40 @@ by the example).
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "manifest_sha256": "…",
   "flakes": {
     ".": { "url": "git+file:///…", "nar_hash": "sha256-…", "revision": "…" }
   },
   "services": {
     "api": {
-      "attr": "narwhal.images.x86_64-linux.api",
-      "store_path": "/nix/store/…-api.tar.gz",
-      "nar_hash": "sha256-…",
-      "image_id": "84b6d144…"
+      "flake": ".",
+      "image": "shop/api",
+      "tag": "latest",
+      "platforms": {
+        "x86_64-linux": {
+          "platform": "linux/amd64",
+          "attr": "narwhal.images.x86_64-linux.api",
+          "store_path": "/nix/store/…-api.tar.gz",
+          "nar_hash": "sha256-…",
+          "image_id": "sha256:84b6d144…"
+        },
+        "aarch64-linux": {
+          "platform": "linux/arm64",
+          "attr": "narwhal.images.aarch64-linux.api",
+          "store_path": "/nix/store/…-api.tar.gz",
+          "nar_hash": "sha256-…",
+          "image_id": "sha256:3d2b91c0…"
+        }
+      }
     }
   }
 }
 ```
+
+Version 1 locks are migrated on load: each flat entry is moved under the system
+parsed from its attr, or the host system when the attr has no system token.
+Platform keys and services are written in sorted order so the lock is stable.
 
 Commit `narwhal.lock.json` **and** `flake.lock`. Then:
 
@@ -175,23 +194,94 @@ narwhal build --locked   # fail instead of accepting a different build
 narwhal verify           # rebuild and compare both fingerprints; exit 4 on drift
 ```
 
-`verify` is a CI gate: it rebuilds every image, loads it, and fails if the Nix
-content hash (`nar_hash`) or podman image id (`image_id`) moved. A changed
-`narwhal.toml` is reported as a warning; a changed image is a failure.
+`verify` is a CI gate: it rebuilds every service/system and fails if the Nix
+content hash (`nar_hash`) or image id (`image_id`) moved. The host platform is
+loaded through podman; foreign platforms are checked from their archives, so
+verification needs no emulator. A changed `narwhal.toml` is reported as a
+warning; a changed image is a failure.
+
+## Multiple platforms
+
+`build.systems` names every platform a project ships. `narwhal build` builds one
+image per service and system, records each under its own `platforms` entry, and
+loads only the host platform into podman by default:
+
+```toml
+[build]
+systems = ["x86_64-linux", "aarch64-linux"]
+```
+
+Building a foreign platform needs a builder or emulator for it: register a
+remote builder in `nix.buildMachines`, or enable binfmt on a Linux host. Without
+one, nix reports that it cannot build the derivation and narwhal adds a hint
+pointing at that requirement.
+
+```sh
+narwhal build --system x86_64-linux            # only the configured host platform
+narwhal build --system x86_64-linux --system aarch64-linux
+narwhal verify --system aarch64-linux --no-load
+```
+
+`--system` is repeatable on `build`, `verify` and `push`, and must name a
+configured system. `--locked` compares every built platform against the lock and
+reports all missing or drifting entries before exiting.
+
+Foreign platforms are verified from the archive: the image id is read from the
+docker-archive `manifest.json`, so no foreign image has to be loadable by the
+local podman. Loading the host platform still uses `podman load` and warns if
+the loaded id differs from the archive.
+
+`up` runs the host platform only. If the host system is not in `build.systems`
+it fails with a usage error listing the configured systems.
+
+`push` validates each locked platform against the manifest attr and, when the
+archive is present, its image id, then pushes exactly that id rather than
+whatever currently owns the tag. A stale lock fails and asks for
+`narwhal build`; it never silently pushes a different image. A single platform
+loads its archive and runs `podman push <sha256-id> docker://<reference>`. If
+the archive was garbage-collected but the lock records an id, push accepts an
+already-loaded image whose id matches the lock.
+
+With more than one platform, push loads each archive and builds a local manifest
+list under a dedicated, destination-specific name,
+`localhost/narwhal-index/<project>/<service>-<hash>:<tag>`, so the image tag is
+never used as the manifest name. It removes any previous local index first,
+then runs
+`podman manifest push --all --rm <index> docker://<reference>`
+to publish a multi-arch OCI index and remove the local list:
+
+```sh
+narwhal push
+narwhal push --system x86_64-linux --system aarch64-linux api
+```
+
+Lock entries store `image_id` as `sha256:<config-hex>` read from the
+docker-archive `manifest.json`. Podman reports the same id without the prefix,
+so comparisons accept either form.
+
+After a push, the local image tag is left on the host platform when the host is
+configured, so a later foreign-only push does not change which platform the tag
+names. When the host is not configured, push restores the tag's previous image
+id. A host lock entry whose attr or OCI platform no longer matches the manifest,
+or a reload that returns an unexpected id, falls back to that previous tag with
+a warning.
+
+Multi-platform push also accepts locked ids whose archives were collected, as
+long as each locked image is still loaded locally.
 
 ## Commands
 
 | command | what it does |
 | --- | --- |
 | `narwhal init [dir]` | scaffold a manifest and flake |
-| `narwhal plan` | services, attrs, images, lock status (`--refresh` queries flakes) |
-| `narwhal build [svc…]` | `nix build` each image, `podman load`, write the lock |
-| `narwhal up [svc…]` | ensure images, network, volumes, start in dependency order, wait for health |
+| `narwhal plan` | service/system rows with attrs, images and lock status (`--refresh` queries flakes) |
+| `narwhal build [svc…] [--system sys]…` | build each service/system, load the host platform, write the lock |
+| `narwhal up [svc…]` | ensure host-platform images, network, volumes, start in dependency order, wait for health |
 | `narwhal down [--volumes]` | stop and remove this project's containers (and volumes) |
 | `narwhal ps` | container, state, health, ports per service |
 | `narwhal logs [svc…] [-f] [--tail n] [--timestamps]` | container logs |
-| `narwhal push [svc…]` | push built images to their registries |
-| `narwhal verify [svc…]` | prove images reproduce from the lock |
+| `narwhal push [svc…] [--system sys]…` | push one image, or a multi-arch OCI index when several platforms are selected |
+| `narwhal verify [svc…] [--system sys]…` | rebuild every service/system and prove it reproduces from the lock |
 | `narwhal version` | print the version |
 
 Global options: `--file <path>`, `--lock <path>`, `-C/--dir <path>`, `--json`,
@@ -217,8 +307,8 @@ Design notes:
 - Manifests are searched upward from the working directory, like `cargo`.
 - Container and volume names carry `io.narwhal.project` / `io.narwhal.service`
   labels, so narwhal only ever touches its own resources.
-- `up` reuses the lock when it matches the manifest, and rebuilds the moment the
-  manifest or the store path changes.
+- `up` reuses the host platform's lock entry when its attr matches and the store
+  path exists, and rebuilds that platform otherwise.
 
 ## License
 

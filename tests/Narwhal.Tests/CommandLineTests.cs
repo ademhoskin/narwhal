@@ -101,4 +101,30 @@ public class CommandLineTests
         var options = CommandLine.Parse(["-h"]);
         Assert.True(options.Help);
     }
+
+    [Fact]
+    public void CollectsRepeatedSystemValues()
+    {
+        var options = CommandLine.Parse(["build", "--system", "x86_64-linux", "--system=i686-linux"]);
+
+        Assert.Equal(["x86_64-linux", "i686-linux"], options.ListValue("system"));
+        Assert.Equal("i686-linux", options.Value("system"));
+    }
+
+    [Theory]
+    [InlineData("build")]
+    [InlineData("verify")]
+    [InlineData("push")]
+    public void SystemIsAValueOptionOnImageCommands(string command)
+    {
+        var options = CommandLine.Parse([command, "--system", "aarch64-linux"]);
+        Assert.Equal(["aarch64-linux"], options.ListValue("system"));
+    }
+
+    [Fact]
+    public void RejectsSystemOnCommandsWithoutIt()
+    {
+        var error = Assert.Throws<UsageException>(() => CommandLine.Parse(["plan", "--system", "x86_64-linux"]));
+        Assert.Contains("unknown option '--system'", error.Message);
+    }
 }

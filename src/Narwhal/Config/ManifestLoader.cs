@@ -42,10 +42,22 @@ public static class ManifestLoader
         var build = read.Table("build", t =>
         {
             var builder = new Reader(t, fullPath, "build");
+            var systems = builder.StringArray("systems");
+
+            if (builder.Get("system") is not null)
+                throw new ManifestException(
+                    $"{fullPath}: build.system is not supported; use systems = [\"<nix-system>\", ...]");
+
+            if (systems.Count == 0 && builder.Get("systems") is not null)
+                throw new ManifestException($"{fullPath}: build.systems must name at least one system");
+
+            if (systems.Count == 0)
+                systems = [NixPlatform.ContainerSystem];
+
             return new BuildOptions
             {
                 AttrPrefix = builder.OptionalString("attr_prefix") ?? "narwhal.images",
-                System = builder.OptionalString("system") ?? NixPlatform.ContainerSystem,
+                Systems = systems,
                 ExtraArgs = builder.StringArray("extra_args"),
                 Impure = builder.OptionalBool("impure") ?? false,
             };
@@ -188,6 +200,20 @@ public static class ManifestLoader
 
     private static void Validate(Manifest manifest)
     {
+        var systems = manifest.Build.Systems;
+        if (systems.Count == 0)
+            throw new ManifestException($"{manifest.Path}: build.systems must name at least one system");
+
+        var seenSystems = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var system in systems)
+        {
+            if (!seenSystems.Add(system))
+                throw new ManifestException($"{manifest.Path}: build.systems lists '{system}' more than once");
+            if (!NixPlatform.IsSupported(system))
+                throw new ManifestException(
+                    $"{manifest.Path}: build.systems contains unsupported system '{system}'; supported systems: {NixPlatform.SupportedSystemsHint}");
+        }
+
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var service in manifest.Services)
         {
