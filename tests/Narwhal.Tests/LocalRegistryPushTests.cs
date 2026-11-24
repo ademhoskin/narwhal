@@ -26,6 +26,8 @@ public class LocalRegistryPushTests
         };
         start.ArgumentList.Add(script);
         start.Environment["NARWHAL_DLL"] = typeof(App).Assembly.Location;
+        start.Environment["NARWHAL_E2E_REGISTRY_PULLED_BY_ATTRIBUTE"] =
+            OptInRegistryFactAttribute.RegistryImagePulled ? "1" : "0";
 
         using var process = Process.Start(start)
             ?? throw new InvalidOperationException("could not start bash");
@@ -96,7 +98,7 @@ public class LocalRegistryPushTests
 }
 
 /// <summary>Runs only when explicitly opted in and its host tools exist.</summary>
-public sealed class OptInRegistryFactAttribute : FactAttribute
+public class OptInRegistryFactAttribute : FactAttribute
 {
     public OptInRegistryFactAttribute()
     {
@@ -127,6 +129,13 @@ public sealed class OptInRegistryFactAttribute : FactAttribute
 
         if (!RegistryImageAvailable())
             Skip = "registry:2 is not available; the e2e needs the image or network access to pull it";
+        else
+            Validate();
+    }
+
+    /// <summary>Extra checks an inheriting fact runs after the shared ones pass.</summary>
+    protected virtual void Validate()
+    {
     }
 
     private static string? NormalizeHostSystem(string host) => host.Trim() switch
@@ -160,8 +169,27 @@ public sealed class OptInRegistryFactAttribute : FactAttribute
     private static bool RegistryImageAvailable()
     {
         var podman = Environment.GetEnvironmentVariable("NARWHAL_PODMAN") ?? "podman";
-        return Run(podman, ["image", "exists", "registry:2"], TimeSpan.FromSeconds(10))
-            || Run(podman, ["pull", "-q", "docker.io/library/registry:2"], TimeSpan.FromSeconds(60));
+        if (Run(podman, ["image", "exists", "registry:2"], TimeSpan.FromSeconds(10)))
+            return true;
+        if (!Run(podman, ["pull", "-q", "docker.io/library/registry:2"], TimeSpan.FromSeconds(60)))
+            return false;
+        RegistryImagePulled = true;
+        return true;
+    }
+
+    /// <summary>True when the discovery-time check pulled registry:2.</summary>
+    public static bool RegistryImagePulled { get; private set; }
+
+    /// <summary>Remove an image this fact pulled; false when removal failed.</summary>
+    protected static bool RemovePulledRegistryImage()
+    {
+        if (!RegistryImagePulled)
+            return true;
+        var podman = Environment.GetEnvironmentVariable("NARWHAL_PODMAN") ?? "podman";
+        if (!Run(podman, ["rmi", "-f", "registry:2"], TimeSpan.FromSeconds(30)))
+            return false;
+        RegistryImagePulled = false;
+        return true;
     }
 
     private static bool Run(string file, string[] arguments, TimeSpan timeout)

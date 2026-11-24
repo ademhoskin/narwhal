@@ -22,4 +22,8 @@
     <DebugType>none</DebugType>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Narwhal.Tests" />
+  </ItemGroup>
+
 </Project>

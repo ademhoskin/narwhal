@@ -10,6 +10,12 @@ namespace Narwhal.Commands;
 /// <summary>build, verify, plan and push: everything that touches nix-built images.</summary>
 public static class BuildCommands
 {
+    private static readonly TimeSpan PushLockTimeout = TimeSpan.FromSeconds(
+        int.TryParse(Environment.GetEnvironmentVariable("NARWHAL_PUSH_LOCK_TIMEOUT_SECONDS"), out var seconds)
+        && seconds > 0
+            ? seconds
+            : 300);
+
     public static async Task<int> BuildAsync(CommandContext ctx, CliOptions options, CancellationToken cancellationToken)
     {
         var locked = options.Flag("locked") || options.Flag("frozen");
@@ -323,6 +329,7 @@ public static class BuildCommands
         foreach (var service in services)
         {
             var reference = service.Reference(ctx.Manifest);
+            using var pushLock = await PushLock.AcquireAsync(reference, PushLockTimeout, cancellationToken);
             var previousId = await ctx.Podman.ImageIdAsync(reference, cancellationToken);
 
             try
