@@ -54,6 +54,46 @@ public sealed class ReconcileStore
         return state;
     }
 
+    /// <summary>
+    /// Loads state for a reconcile cycle. A missing or corrupt file is state loss, not a fatal error:
+    /// the caller restores ordering from signed status and bumps the epoch.
+    /// </summary>
+    public ReconcileState LoadStateForRecovery(out bool lost, out string? warning)
+    {
+        lost = false;
+        warning = null;
+        if (!File.Exists(StatePath))
+        {
+            lost = true;
+            return new ReconcileState();
+        }
+
+        try
+        {
+            var state = JsonSerializer.Deserialize(
+                File.ReadAllBytes(StatePath),
+                ReconcileJsonContext.Compact.ReconcileState);
+            if (state is null ||
+                !string.Equals(state.Schema, ReconcileSchema.State, StringComparison.Ordinal) ||
+                state.HighestGeneration < 0 ||
+                state.StatusSeq < 0 ||
+                state.StatusEpoch < 0)
+            {
+                lost = true;
+                warning = $"ignoring invalid state {StatePath}; status epoch will advance";
+                return new ReconcileState();
+            }
+
+            return state;
+        }
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
+        {
+            lost = true;
+            warning = $"ignoring unreadable state {StatePath}: {e.Message}; status epoch will advance";
+            return new ReconcileState();
+        }
+    }
+
     public void SaveState(ReconcileState state) =>
         WriteAtomic(StatePath, JsonSerializer.SerializeToUtf8Bytes(state, ReconcileJsonContext.Compact.ReconcileState));
 

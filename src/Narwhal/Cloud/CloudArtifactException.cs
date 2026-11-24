@@ -9,6 +9,8 @@ public static class CloudArtifactErrorCodes
     public const string SemanticInvalid = "semantic_invalid";
     public const string DigestMismatch = "digest_mismatch";
     public const string SignatureInvalid = "signature_invalid";
+    public const string UnknownKey = "unknown_key";
+    public const string KeyExpired = "key_expired";
     public const string TrustSetInvalid = "trust_set_invalid";
     public const string TargetMismatch = "target_mismatch";
     public const string ProjectMismatch = "project_mismatch";

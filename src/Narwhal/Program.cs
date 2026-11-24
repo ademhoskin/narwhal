@@ -114,6 +114,8 @@ public static class App
                 return InitCommand.Run(options, reporter);
             case "reconcile":
                 return await ReconcileCommand.RunAsync(options, reporter, cancellationToken);
+            case "status":
+                return await StatusCommand.RunAsync(options, reporter, cancellationToken);
         }
 
         var context = CommandContext.Create(options);

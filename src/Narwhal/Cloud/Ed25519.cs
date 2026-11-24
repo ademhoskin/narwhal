@@ -188,7 +188,7 @@ internal static class Ed25519
         public Point Negate() => new(Mod(-X), Y, Z, Mod(-T));
     }
 
-    // Test-only signing and key derivation. Not part of the verification path.
+    /// <summary>Derives the RFC 8032 public key from a 32-byte Ed25519 seed.</summary>
     internal static byte[] PublicKeyFromSeed(ReadOnlySpan<byte> seed)
     {
         if (seed.Length != 32)
@@ -202,6 +202,7 @@ internal static class Ed25519
         return EncodePoint(Multiply(FromLittleEndian(scalarBytes), Base));
     }
 
+    /// <summary>Signs a message with the RFC 8032 deterministic signing procedure.</summary>
     internal static byte[] Sign(ReadOnlySpan<byte> seed, ReadOnlySpan<byte> message)
     {
         if (seed.Length != 32)

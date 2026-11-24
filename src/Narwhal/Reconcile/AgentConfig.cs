@@ -22,6 +22,12 @@ public sealed class AgentConfig
     public required string TrustDirectory { get; init; }
     public required string StateDirectory { get; init; }
     public string? StatusKeyPath { get; init; }
+    /// <summary>Provider-reported host identity, when bootstrap supplied one.</summary>
+    public string? HostId { get; init; }
+    /// <summary>Registered per-host status public keys used to verify status artifacts.</summary>
+    public required StatusKeySet StatusKeys { get; init; }
+    /// <summary>Extra literal patterns redacted from status error text and log tails.</summary>
+    public IReadOnlyList<string> LogRedactPatterns { get; init; } = [];
     public RegistryAuthConfig Auth { get; init; } = new();
 
     /// <summary>
@@ -88,12 +94,14 @@ public static class AgentConfigLoader
     [
         "project", "image_registry", "state_registry", "desired_repo", "status_repo",
         "poll_seconds", "lock_timeout_seconds", "mode", "trust_dir", "state_dir", "status_key",
+        "host_id", "status_keys", "status_public_keys", "log_redact",
         "target", "registry_auth", "image_registry_auth",
     ];
 
     private static readonly string[] TargetKeys =
     [
         "provider", "region", "arch", "selector", "mode", "trust_dir", "state_dir", "status_key",
+        "status_keys", "status_public_keys", "log_redact",
     ];
 
     private static readonly string[] AuthKeys = ["username", "password", "token", "credential_helper", "insecure"];
@@ -209,6 +217,9 @@ public static class AgentConfigLoader
         var trustDirectory = ReadDirectory(read, targetRead, "trust_dir", DefaultTrustDirectory);
         var stateDirectory = ReadDirectory(read, targetRead, "state_dir", DefaultStateDirectory);
         var statusKeyPath = ReadOptionalAbsolutePath(read, targetRead, "status_key") ?? DefaultStatusKeyPath;
+        var hostId = ReadHostId(read);
+        var statusKeys = ReadStatusKeys(read, targetRead, path);
+        var logRedact = ReadStringArray(targetRead, "log_redact", ReadStringArray(read, "log_redact"));
 
         var pollSeconds = ReadInteger(read, "poll_seconds", 30, 1, 86_400);
         var lockTimeoutSeconds = ReadInteger(read, "lock_timeout_seconds", 120, 0, 3_600);
@@ -240,9 +251,152 @@ public static class AgentConfigLoader
             TrustDirectory = trustDirectory,
             StateDirectory = stateDirectory,
             StatusKeyPath = statusKeyPath,
+            HostId = hostId,
+            StatusKeys = statusKeys,
+            LogRedactPatterns = logRedact,
             Auth = auth,
             ImageRegistryAuth = imageAuth,
         };
+    }
+
+    private static string? ReadHostId(Reader read)
+    {
+        var value = read.OptionalString("host_id");
+        if (value is null)
+            return null;
+        if (value.Length > 256 || !Regex.IsMatch(value, "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$", RegexOptions.CultureInvariant))
+            throw read.Error("host_id", "expected 1-256 characters of letters, digits, '.', '_', ':' or '-'");
+        return value;
+    }
+
+    private static IReadOnlyList<string> ReadStringArray(
+        Reader read,
+        string key,
+        IReadOnlyList<string>? fallback = null)
+    {
+        var value = read.Get(key);
+        if (value is null)
+            return fallback ?? [];
+        if (value is not TomlArray array)
+            throw read.Error(key, "expected an array of strings");
+
+        var values = new List<string>(array.Items.Count);
+        for (var i = 0; i < array.Items.Count; i++)
+        {
+            if (array.Items[i] is not TomlString text || text.Value.Length == 0 || text.Value.Length > 1024)
+                throw read.Error($"{key}[{i}]", "expected a non-empty string of at most 1024 characters");
+            values.Add(text.Value);
+        }
+
+        return values;
+    }
+
+    private static StatusKeySet ReadStatusKeys(Reader root, Reader target, string path)
+    {
+        var keys = new Dictionary<string, TrustedKey>(StringComparer.Ordinal);
+        MergeStatusKeyTable(root, "status_keys", "status_keys", keys, path);
+        MergeStatusKeyTable(target, "status_keys", "target.status_keys", keys, path);
+        MergeStatusPublicKeys(root, "status_public_keys", "status_public_keys", keys, path);
+        MergeStatusPublicKeys(target, "status_public_keys", "target.status_public_keys", keys, path);
+        return StatusKeySet.FromKeys(keys.Values);
+    }
+
+    private static void MergeStatusKeyTable(
+        Reader reader,
+        string key,
+        string name,
+        Dictionary<string, TrustedKey> keys,
+        string path)
+    {
+        var value = reader.Get(key);
+        if (value is null)
+            return;
+        if (value is not TomlTable table)
+            throw new AgentConfigException($"{path}: {name}: expected a table of status public keys");
+
+        foreach (var (keyId, entry) in table.Entries)
+        {
+            if (!CloudPatterns.KeyId().IsMatch(keyId))
+                throw new AgentConfigException($"{path}: {name}.{keyId}: expected 16 lowercase hex characters");
+
+            string publicKeyText;
+            string? notAfterText = null;
+            if (entry is TomlString text)
+            {
+                publicKeyText = text.Value;
+            }
+            else if (entry is TomlTable keyTable)
+            {
+                foreach (var nested in keyTable.Entries.Keys)
+                {
+                    if (nested is not ("public_key" or "not_after"))
+                        throw new AgentConfigException($"{path}: {name}.{keyId}.{nested}: unknown key");
+                }
+
+                publicKeyText = keyTable.Get("public_key") is TomlString configuredKey ? configuredKey.Value
+                    : throw new AgentConfigException($"{path}: {name}.{keyId}.public_key: expected a string");
+                if (keyTable.Get("not_after") is { } configuredNotAfter)
+                {
+                    if (configuredNotAfter is not TomlString timestamp)
+                        throw new AgentConfigException($"{path}: {name}.{keyId}.not_after: expected a string");
+                    notAfterText = timestamp.Value;
+                }
+            }
+            else
+            {
+                throw new AgentConfigException($"{path}: {name}.{keyId}: expected a public key string or table");
+            }
+
+            if (!CloudEncoding.TryDecodeBase64(publicKeyText, out var publicKey) || publicKey.Length != 32)
+                throw new AgentConfigException($"{path}: {name}.{keyId}: expected canonical base64 for a 32-byte key");
+            if (!string.Equals(KeyId.Derive(publicKey), keyId, StringComparison.Ordinal))
+                throw new AgentConfigException($"{path}: {name}.{keyId}: key ID does not match the public key");
+
+            DateTimeOffset? notAfter = null;
+            if (notAfterText is not null)
+            {
+                if (!CloudEncoding.TryParseUtcTimestamp(notAfterText, out var parsed))
+                    throw new AgentConfigException($"{path}: {name}.{keyId}.not_after: expected an RFC 3339 UTC timestamp");
+                notAfter = parsed;
+            }
+
+            AddStatusKey(keys, new TrustedKey { KeyId = keyId, PublicKey = publicKey, NotAfter = notAfter }, path);
+        }
+    }
+
+    private static void MergeStatusPublicKeys(
+        Reader reader,
+        string key,
+        string name,
+        Dictionary<string, TrustedKey> keys,
+        string path)
+    {
+        var value = reader.Get(key);
+        if (value is null)
+            return;
+        if (value is not TomlArray array)
+            throw new AgentConfigException($"{path}: {name}: expected an array of base64 public keys");
+
+        for (var i = 0; i < array.Items.Count; i++)
+        {
+            if (array.Items[i] is not TomlString text)
+                throw new AgentConfigException($"{path}: {name}[{i}]: expected a string");
+            if (!CloudEncoding.TryDecodeBase64(text.Value, out var publicKey) || publicKey.Length != 32)
+                throw new AgentConfigException($"{path}: {name}[{i}]: expected canonical base64 for a 32-byte key");
+            AddStatusKey(keys, new TrustedKey { KeyId = KeyId.Derive(publicKey), PublicKey = publicKey }, path);
+        }
+    }
+
+    private static void AddStatusKey(Dictionary<string, TrustedKey> keys, TrustedKey key, string path)
+    {
+        if (keys.TryGetValue(key.KeyId, out var existing))
+        {
+            if (!existing.PublicKey.AsSpan().SequenceEqual(key.PublicKey) || existing.NotAfter != key.NotAfter)
+                throw new AgentConfigException($"{path}: status key {key.KeyId} is configured twice with different values");
+            return;
+        }
+
+        keys.Add(key.KeyId, key);
     }
 
     private static RegistryAuthConfig ReadAuth(Reader read, string tableName, string environmentPrefix)

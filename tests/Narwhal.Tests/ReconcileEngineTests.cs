@@ -568,9 +568,8 @@ public class ReconcileEngineTests
     }
 
     [Fact]
-    public void StatusDocumentsCarryNoSignatureAndPublishingIsExplicitlyDeferred()
+    public void StatusDocumentsDoNotEmbedSignatureMaterial()
     {
-        Assert.True(ReconcileStatusDocument.SigningAndPublishingDeferred);
         Assert.Null(typeof(ReconcileStatusDocument).GetProperty("Signature"));
         Assert.Null(typeof(ReconcileStatusDocument).GetProperty("StatusSignature"));
     }

@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using Narwhal.Cli;
 using Narwhal.Cloud;
+using Narwhal.Podman;
 using Narwhal.Reconcile;
 
 namespace Narwhal.Tests;
@@ -54,7 +55,9 @@ internal static class ReconcileTestData
     public static AgentConfig Config(
         string stateDirectory,
         string? desiredRepository = null,
-        string project = Project) => new()
+        string project = Project,
+        string? hostId = "i-test-host",
+        IReadOnlyList<string>? logRedact = null) => new()
     {
         Project = project,
         ImageRegistry = "registry.example.com",
@@ -70,6 +73,9 @@ internal static class ReconcileTestData
         StateDirectory = stateDirectory,
         TrustDirectory = Path.Combine(stateDirectory, "boot-trust"),
         StatusKeyPath = Path.Combine(stateDirectory, "status-key"),
+        HostId = hostId,
+        StatusKeys = StatusKeySet.FromBase64([Convert.ToBase64String(CloudArtifactTestData.PublicKey1)]),
+        LogRedactPatterns = logRedact ?? [],
         LockTimeoutSeconds = 0,
     };
 
@@ -216,6 +222,7 @@ internal sealed class FakeRuntime : IContainerRuntime
     private readonly Dictionary<string, ContainerObservation> _containers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<string>> _health = new(StringComparer.Ordinal);
     private readonly HashSet<string> _images = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<string>> _logs = new(StringComparer.Ordinal);
 
     public List<(string Project, ServicePlan Plan, long Generation)> Created { get; } = [];
     public List<string> Removed { get; } = [];
@@ -226,12 +233,15 @@ internal sealed class FakeRuntime : IContainerRuntime
     public HashSet<string> BadImageDigests { get; } = new(StringComparer.Ordinal);
     public bool PullMakesImageAvailable { get; set; } = true;
     public Action? BeforeCreate { get; set; }
+    public string? FailCreateWith { get; set; }
 
     public IReadOnlyCollection<ContainerObservation> Containers => _containers.Values;
 
     public void AddImage(string repository, string digest) => _images.Add(repository + "@" + digest);
 
     public void AddContainer(ContainerObservation observation) => _containers[observation.Name] = observation;
+
+    public void SetLogs(string containerName, params string[] lines) => _logs[containerName] = [.. lines];
 
     public void SetHealth(string service, params string[] statuses)
     {
@@ -264,6 +274,9 @@ internal sealed class FakeRuntime : IContainerRuntime
     public Task CreateAsync(string project, ServicePlan plan, string containerName, string network, long generation, CancellationToken cancellationToken)
     {
         BeforeCreate?.Invoke();
+        if (FailCreateWith is not null)
+            throw new PodmanException(FailCreateWith);
+
         Created.Add((project, plan, generation));
         _images.Add(plan.ImageReference);
 
@@ -339,6 +352,10 @@ internal sealed class FakeRuntime : IContainerRuntime
 
         return Task.FromResult<string?>("healthy");
     }
+
+    public Task<IReadOnlyList<string>> LogsTailAsync(string containerName, int lines, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<string>>(
+            _logs.TryGetValue(containerName, out var output) ? output.TakeLast(lines).ToList() : []);
 
     private static ContainerObservation Copy(ContainerObservation observation, string state, string? health = null) => new()
     {

@@ -52,6 +52,14 @@ public sealed class ReconcileState
     public LastErrorInfo? LastError { get; set; }
     public long StatusEpoch { get; set; }
     public long StatusSeq { get; set; }
+    public string? LastStatusPublishedAt { get; set; }
+    public string? LastStatusFingerprint { get; set; }
+    public bool StatusPublishPending { get; set; }
+    public bool StatusStateLost { get; set; }
+    public long LastKnownStatusEpoch { get; set; }
+    public long LastKnownStatusSeq { get; set; }
+    public string? LastHostId { get; set; }
+    public bool ArtifactCacheMissing { get; set; }
 }
 
 public sealed class LastErrorInfo
@@ -94,9 +102,6 @@ public sealed class JournalAction
 
 public sealed class ReconcileStatusDocument
 {
-    /// <summary>Status signing and publication are deferred to the narwhald/status task.</summary>
-    public const bool SigningAndPublishingDeferred = true;
-
     public string Schema { get; set; } = ReconcileSchema.Status;
     public int Version { get; set; } = 1;
     public string Project { get; set; } = "";

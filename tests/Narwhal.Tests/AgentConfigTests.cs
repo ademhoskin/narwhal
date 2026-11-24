@@ -76,6 +76,30 @@ public class AgentConfigTests
         Assert.Equal("/var/lib/narwhal", config.StateDirectory);
     }
 
+    [Fact]
+    public void TargetLogRedactOverridesTheRootArray()
+    {
+        var root = Sample.Replace(
+            "lock_timeout_seconds = 120",
+            "lock_timeout_seconds = 120\nlog_redact = [\"root-secret\"]",
+            StringComparison.Ordinal);
+        var rootConfig = AgentConfigLoader.Parse(root);
+        Assert.Equal(["root-secret"], rootConfig.LogRedactPatterns);
+
+        var target = root.Replace(
+            "selector = { stack = \"prod\" }",
+            "selector = { stack = \"prod\" }\nlog_redact = [\"target-secret\"]",
+            StringComparison.Ordinal);
+        var targetConfig = AgentConfigLoader.Parse(target);
+        Assert.Equal(["target-secret"], targetConfig.LogRedactPatterns);
+
+        var empty = target.Replace(
+            "log_redact = [\"target-secret\"]",
+            "log_redact = []",
+            StringComparison.Ordinal);
+        Assert.Empty(AgentConfigLoader.Parse(empty).LogRedactPatterns);
+    }
+
     [Theory]
     [InlineData("project = \"shop\"", "flavor = true", "unknown key")]
     [InlineData("project = \"shop\"", "project = \"SHOP\"", "project")]

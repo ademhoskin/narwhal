@@ -21,20 +21,32 @@ public interface IRegistryClient
     Task<byte[]> GetBlobAsync(string repository, string digest, CancellationToken cancellationToken);
 }
 
+/// <summary>The result of pushing an OCI manifest.</summary>
+public sealed record RegistryPushResult(string Digest, string Reference);
+
 /// <summary>A registry transport, authentication, or protocol error.</summary>
-public sealed class RegistryException(string message, bool auth = false) : Exception(message)
+public sealed class RegistryException(string message, bool auth = false, int? statusCode = null) : Exception(message)
 {
     public bool Auth { get; } = auth;
+    public int? StatusCode { get; } = statusCode;
+}
+
+/// <summary>The registry rejected a manifest shape, so the documented fallback may be attempted.</summary>
+public sealed class RegistryManifestRejectedException(int statusCode, string message) : Exception(message)
+{
+    public int StatusCode { get; } = statusCode;
 }
 
 /// <summary>Minimal OCI Distribution client with basic and bearer-token authentication.</summary>
-public sealed class OciRegistryClient : IRegistryClient, IDisposable
+public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDisposable
 {
     private const string ManifestMediaType = "application/vnd.oci.image.manifest.v1+json";
     private const string DockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json";
+    private const int MaxRedirects = 5;
 
     private readonly HttpClient _http;
     private readonly string _baseAddress;
+    private readonly Uri _baseUri;
     private readonly RegistryAuthConfig _auth;
     private readonly Reporter? _reporter;
     private readonly Dictionary<string, CachedToken> _tokens = new(StringComparer.Ordinal);
@@ -48,20 +60,44 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
     {
         var scheme = auth.Insecure ? "http" : "https";
         _baseAddress = $"{scheme}://{registry}";
+        _baseUri = new Uri(_baseAddress);
         _auth = auth;
         _reporter = reporter;
-        _http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+        _http = handler is null
+            ? new HttpClient(CreateDefaultHandler())
+            : new HttpClient(handler, disposeHandler: false);
         _http.Timeout = TimeSpan.FromSeconds(60);
     }
+
+    internal static HttpClientHandler CreateDefaultHandler() =>
+        new() { AllowAutoRedirect = false };
 
     public static OciRegistryClient Create(AgentConfig config, Reporter reporter, HttpMessageHandler? handler = null) =>
         new(config.StateRegistry ?? config.ImageRegistry, config.Auth, reporter, handler);
 
     public async Task<RegistryManifest> GetManifestAsync(string repository, string reference, CancellationToken cancellationToken)
     {
+        var (digest, bytes) = await FetchManifestBytesAsync(repository, reference, cancellationToken);
+        var layers = OciManifestParser.Parse(bytes, repository, reference);
+        return new RegistryManifest(digest, bytes, layers, DesiredArtifactLayout.Select(layers));
+    }
+
+    /// <summary>Fetches the status artifact manifest, selecting the status payload and signature layers.</summary>
+    public async Task<RegistryManifest> GetStatusManifestAsync(string repository, string reference, CancellationToken cancellationToken)
+    {
+        var (digest, bytes) = await FetchManifestBytesAsync(repository, reference, cancellationToken);
+        var layers = OciManifestParser.Parse(bytes, repository, reference);
+        return new RegistryManifest(digest, bytes, layers, StatusArtifactLayout.Select(layers));
+    }
+
+    private async Task<(string Digest, byte[] Bytes)> FetchManifestBytesAsync(
+        string repository,
+        string reference,
+        CancellationToken cancellationToken)
+    {
         var path = $"/v2/{repository}/manifests/{reference}";
         using var response = await SendWithAuthAsync(HttpMethod.Get, path, repository, "pull", acceptManifest: true, cancellationToken);
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        var bytes = await ReadBodyAsync(response, path, cancellationToken);
         var digest = CloudEncoding.Sha256Digest(bytes);
 
         var header = response.Headers.TryGetValues("Docker-Content-Digest", out var values)
@@ -73,9 +109,7 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
         if (CloudPatterns.Digest().IsMatch(reference) && !string.Equals(reference, digest, StringComparison.Ordinal))
             throw new RegistryException($"manifest bytes do not match the pinned digest for {repository}:{reference}");
 
-        var layers = OciManifestParser.Parse(bytes, repository, reference);
-        var selection = DesiredArtifactLayout.Select(layers);
-        return new RegistryManifest(digest, bytes, layers, selection);
+        return (digest, bytes);
     }
 
     public async Task<byte[]> GetBlobAsync(string repository, string digest, CancellationToken cancellationToken)
@@ -87,7 +121,7 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
             "pull",
             acceptManifest: false,
             cancellationToken);
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        var bytes = await ReadBodyAsync(response, $"/v2/{repository}/blobs/{digest}", cancellationToken);
         var actual = CloudEncoding.Sha256Digest(bytes);
         if (!string.Equals(actual, digest, StringComparison.Ordinal))
             throw new CloudArtifactException(
@@ -96,13 +130,132 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
         return bytes;
     }
 
+    public async Task<bool> BlobExistsAsync(string repository, string digest, CancellationToken cancellationToken)
+    {
+        using var response = await SendWithAuthAsync(
+            HttpMethod.Head,
+            $"/v2/{repository}/blobs/{digest}",
+            repository,
+            "pull",
+            acceptManifest: false,
+            cancellationToken,
+            isExpectedFailure: static response => response.StatusCode is
+                HttpStatusCode.NotFound or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden);
+        return response.IsSuccessStatusCode;
+    }
+
+    /// <summary>Uploads a blob when it is absent, using the OCI two-step upload flow.</summary>
+    public async Task PushBlobAsync(string repository, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+    {
+        var digest = CloudEncoding.Sha256Digest(bytes.Span);
+        if (await BlobExistsAsync(repository, digest, cancellationToken))
+            return;
+
+        using var start = await SendWithAuthAsync(
+            HttpMethod.Post,
+            $"/v2/{repository}/blobs/uploads/",
+            repository,
+            "pull,push",
+            acceptManifest: false,
+            cancellationToken);
+        if (start.StatusCode != HttpStatusCode.Accepted)
+            throw new RegistryException(
+                $"registry did not start an upload session for {repository} (status {(int)start.StatusCode})");
+
+        var location = start.Headers.Location?.ToString();
+        if (string.IsNullOrEmpty(location))
+            throw new RegistryException($"registry did not return an upload location for {repository}");
+
+        var uploadPath = ResolveUploadLocation(location);
+        uploadPath += (uploadPath.Contains('?') ? "&" : "?") +
+                      "digest=" + Uri.EscapeDataString(digest);
+
+        using var completed = await SendWithAuthAsync(
+            HttpMethod.Put,
+            uploadPath,
+            repository,
+            "pull,push",
+            acceptManifest: false,
+            cancellationToken,
+            body: bytes.ToArray(),
+            contentType: "application/octet-stream");
+
+        var header = completed.Headers.TryGetValues("Docker-Content-Digest", out var values)
+            ? values.FirstOrDefault()
+            : null;
+        if (header is not null && !string.Equals(header, digest, StringComparison.Ordinal))
+            throw new RegistryException($"uploaded blob digest header does not match {digest}");
+    }
+
+    /// <summary>Pushes a manifest by tag or digest. Rejection returns <see cref="RegistryManifestRejectedException"/>.</summary>
+    public async Task<RegistryPushResult> PushManifestAsync(
+        string repository,
+        string reference,
+        byte[] manifest,
+        string mediaType,
+        CancellationToken cancellationToken)
+    {
+        using var response = await SendWithAuthAsync(
+            HttpMethod.Put,
+            $"/v2/{repository}/manifests/{reference}",
+            repository,
+            "pull,push",
+            acceptManifest: false,
+            cancellationToken,
+            body: manifest,
+            contentType: mediaType,
+            isExpectedFailure: static response => (int)response.StatusCode is 400 or 415 or 422);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new RegistryManifestRejectedException(
+                (int)response.StatusCode,
+                $"registry rejected the manifest for {repository}:{reference} with status {(int)response.StatusCode}");
+        }
+
+        var digest = CloudEncoding.Sha256Digest(manifest);
+        var header = response.Headers.TryGetValues("Docker-Content-Digest", out var values)
+            ? values.FirstOrDefault()
+            : null;
+        if (header is not null && !string.Equals(header, digest, StringComparison.Ordinal))
+            throw new RegistryException($"manifest digest header does not match the manifest bytes for {repository}:{reference}");
+
+        return new RegistryPushResult(digest, reference);
+    }
+
+    private string ResolveUploadLocation(string location)
+    {
+        if (location.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            location.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            var absolute = new Uri(location, UriKind.Absolute);
+            var baseUri = new Uri(_baseAddress);
+            if (!string.Equals(absolute.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(absolute.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase) ||
+                absolute.Port != baseUri.Port)
+            {
+                throw new RegistryException("registry upload location must stay on the registry origin");
+            }
+
+            return absolute.PathAndQuery;
+        }
+
+        if (location.StartsWith("//", StringComparison.Ordinal))
+            throw new RegistryException("registry upload location must stay on the registry origin");
+
+        return location.StartsWith('/') ? location : "/" + location;
+    }
+
     private async Task<HttpResponseMessage> SendWithAuthAsync(
         HttpMethod method,
         string path,
         string repository,
         string actions,
         bool acceptManifest,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        byte[]? body = null,
+        string? contentType = null,
+        Func<HttpResponseMessage, bool>? isExpectedFailure = null)
     {
         var scope = $"repository:{repository}:{actions}";
         var token = CurrentToken(scope);
@@ -117,42 +270,57 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            using var request = new HttpRequestMessage(method, _baseAddress + path);
-            if (acceptManifest)
-            {
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(ManifestMediaType));
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(DockerManifestMediaType));
-            }
+            var (response, onBaseOrigin) = await SendFollowingRedirectsAsync(
+                method,
+                new Uri(_baseAddress + path),
+                path,
+                acceptManifest,
+                token,
+                basic,
+                body,
+                contentType,
+                cancellationToken);
 
-            if (token is not null)
+            if (!onBaseOrigin)
             {
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            }
-            else if (basic is not null)
-            {
-                var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{basic.Username}:{basic.Secret}"));
-                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encoded);
-            }
+                if (isExpectedFailure is not null && isExpectedFailure(response))
+                    return response;
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                {
+                    var statusCode = (int)response.StatusCode;
+                    response.Dispose();
+                    throw new RegistryException(
+                        "redirected registry request was rejected",
+                        auth: true,
+                        statusCode: statusCode);
+                }
 
-            HttpResponseMessage response;
-            try
-            {
-                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            }
-            catch (Exception e) when ((e is HttpRequestException or TaskCanceledException) && !cancellationToken.IsCancellationRequested)
-            {
-                throw new RegistryException($"registry request failed: {e.Message}");
-            }
-
-            if (response.StatusCode is not (HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden))
-            {
                 if (!response.IsSuccessStatusCode)
                 {
                     using (response)
                     {
                         throw new RegistryException(
                             $"registry returned {(int)response.StatusCode} for {path}",
-                            auth: response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden);
+                            statusCode: (int)response.StatusCode);
+                    }
+                }
+
+                return response;
+            }
+
+            if (response.StatusCode is not (HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden))
+            {
+                if (isExpectedFailure is not null && isExpectedFailure(response))
+                    return response;
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    using (response)
+                    {
+                        throw new RegistryException(
+                            $"registry returned {(int)response.StatusCode} for {path}",
+                            auth: response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden,
+                            statusCode: (int)response.StatusCode);
                     }
                 }
 
@@ -172,6 +340,94 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
         }
 
         throw new RegistryException($"registry rejected credentials for {repository}", auth: true);
+    }
+
+    private async Task<(HttpResponseMessage Response, bool OnBaseOrigin)> SendFollowingRedirectsAsync(
+        HttpMethod method,
+        Uri initial,
+        string path,
+        bool acceptManifest,
+        string? token,
+        RegistryCredential? basic,
+        byte[]? body,
+        string? contentType,
+        CancellationToken cancellationToken)
+    {
+        var uri = initial;
+        for (var redirects = 0; ; redirects++)
+        {
+            using var request = new HttpRequestMessage(method, uri);
+            if (acceptManifest)
+            {
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(ManifestMediaType));
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(DockerManifestMediaType));
+            }
+
+            if (body is not null)
+            {
+                request.Content = new ByteArrayContent(body);
+                if (contentType is not null)
+                    request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+            }
+
+            if (IsBaseOrigin(uri))
+            {
+                if (token is not null)
+                {
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                }
+                else if (basic is not null)
+                {
+                    var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{basic.Username}:{basic.Secret}"));
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encoded);
+                }
+            }
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            }
+            catch (Exception e) when ((e is HttpRequestException or TaskCanceledException) && !cancellationToken.IsCancellationRequested)
+            {
+                throw new RegistryException($"registry request failed: {e.Message}");
+            }
+
+            if (!IsRedirect(response.StatusCode))
+                return (response, IsBaseOrigin(uri));
+
+            if (method != HttpMethod.Get && method != HttpMethod.Head)
+            {
+                response.Dispose();
+                throw new RegistryException($"registry redirect rejected for {path}");
+            }
+
+            var location = response.Headers.Location;
+            response.Dispose();
+            if (location is null)
+                throw new RegistryException($"registry redirect has no location for {uri}");
+            if (redirects == MaxRedirects)
+                throw new RegistryException($"registry redirect limit exceeded for {path}");
+
+            var next = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            ValidateRedirect(uri, next);
+            uri = next;
+        }
+    }
+
+    private bool IsBaseOrigin(Uri uri) =>
+        string.Equals(uri.Scheme, _baseUri.Scheme, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(uri.Host, _baseUri.Host, StringComparison.OrdinalIgnoreCase) &&
+        uri.Port == _baseUri.Port;
+
+    private static void ValidateRedirect(Uri from, Uri to)
+    {
+        if (to.Scheme != Uri.UriSchemeHttp && to.Scheme != Uri.UriSchemeHttps)
+            throw new RegistryException($"registry redirect uses an unsupported scheme: {to.Scheme}");
+        if (from.Scheme == Uri.UriSchemeHttps && to.Scheme == Uri.UriSchemeHttp)
+            throw new RegistryException("registry redirect must not downgrade HTTPS");
+        if (to.UserInfo.Length > 0 || to.Fragment.Length > 0)
+            throw new RegistryException("registry redirect must not carry userinfo or a fragment");
     }
 
     private string? CurrentToken(string scope)
@@ -194,7 +450,21 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
         }
 
         ValidateRealm(realm);
-        var credential = await ResolveCredentialAsync(cancellationToken);
+        RegistryCredential? credential;
+        try
+        {
+            credential = await ResolveCredentialAsync(cancellationToken);
+        }
+        catch (RegistryException)
+        {
+            throw;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or HttpRequestException or
+                                  JsonException or FormatException or InvalidOperationException)
+        {
+            throw new RegistryException($"registry credential resolution failed: {e.Message}", auth: true);
+        }
+
         var service = challenge.Service ?? "";
         var requestedScope = challenge.Scope ?? scope;
         var url = challenge.Realm +
@@ -209,26 +479,91 @@ public sealed class OciRegistryClient : IRegistryClient, IDisposable
             request.Headers.Authorization = new AuthenticationHeaderValue("Basic", basic);
         }
 
-        using var response = await _http.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-            throw new RegistryException("registry token request failed", auth: true);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, cancellationToken);
+        }
+        catch (Exception e) when ((e is HttpRequestException or TaskCanceledException or IOException) &&
+                                  !cancellationToken.IsCancellationRequested)
+        {
+            throw new RegistryException($"registry token request failed: {e.Message}", auth: true);
+        }
 
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        using var document = JsonDocument.Parse(bytes);
-        var root = document.RootElement;
-        var token = root.TryGetProperty("token", out var direct)
-            ? direct.GetString()
-            : root.TryGetProperty("access_token", out var access) ? access.GetString() : null;
-        if (string.IsNullOrEmpty(token))
-            throw new RegistryException("registry token response did not contain a token", auth: true);
+        using (response)
+        {
+            if (IsRedirect(response.StatusCode))
+                throw new RegistryException("registry token redirect rejected", auth: true);
+            if (!response.IsSuccessStatusCode)
+                throw new RegistryException("registry token request failed", auth: true);
 
-        var lifetime = root.TryGetProperty("expires_in", out var expires) && expires.TryGetInt32(out var seconds)
-            ? Math.Max(1, seconds)
-            : 60;
-        _reporter?.Detail($"registry token acquired for {requestedScope}");
-        _tokens[scope] = new CachedToken(token, DateTimeOffset.UtcNow.AddSeconds(lifetime * 0.8));
-        return token;
+            byte[] bytes;
+            try
+            {
+                bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            }
+            catch (Exception e) when ((e is HttpRequestException or TaskCanceledException or IOException) &&
+                                      !cancellationToken.IsCancellationRequested)
+            {
+                throw new RegistryException($"cannot read the registry token response: {e.Message}", auth: true);
+            }
+
+            JsonDocument document;
+            try
+            {
+                document = JsonDocument.Parse(bytes);
+            }
+            catch (JsonException)
+            {
+                throw new RegistryException("registry token response is not JSON", auth: true);
+            }
+
+            using (document)
+            {
+                var root = document.RootElement;
+                string? token;
+                int lifetime;
+                try
+                {
+                    token = root.TryGetProperty("token", out var direct)
+                        ? direct.GetString()
+                        : root.TryGetProperty("access_token", out var access) ? access.GetString() : null;
+                    lifetime = root.TryGetProperty("expires_in", out var expires) && expires.TryGetInt32(out var seconds)
+                        ? Math.Max(1, seconds)
+                        : 60;
+                }
+                catch (InvalidOperationException)
+                {
+                    throw new RegistryException("registry token response has an invalid shape", auth: true);
+                }
+
+                if (string.IsNullOrEmpty(token))
+                    throw new RegistryException("registry token response did not contain a token", auth: true);
+
+                _reporter?.Detail($"registry token acquired for {requestedScope}");
+                _tokens[scope] = new CachedToken(token, DateTimeOffset.UtcNow.AddSeconds(lifetime * 0.8));
+                return token;
+            }
+        }
     }
+
+    private static async Task<byte[]> ReadBodyAsync(
+        HttpResponseMessage response,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        }
+        catch (Exception e) when ((e is HttpRequestException or TaskCanceledException or IOException) &&
+                                  !cancellationToken.IsCancellationRequested)
+        {
+            throw new RegistryException($"cannot read the registry response for {path}: {e.Message}");
+        }
+    }
+
+    private static bool IsRedirect(HttpStatusCode status) => (int)status is 301 or 302 or 303 or 307 or 308;
 
     private void ValidateRealm(Uri realm)
     {

@@ -6,8 +6,8 @@ namespace Narwhal.Reconcile;
 
 /// <summary><c>narwhal reconcile</c>: one engine cycle, optionally printing the status document.</summary>
 /// <remarks>
-/// Status signing and publishing are deferred to the narwhald/status task. This command returns the
-/// unsigned status document for inspection and never pushes it to the status repository.
+/// Publishing is best effort: a registry failure queues the signed status and never changes the
+/// cycle's exit code.
 /// </remarks>
 public static class ReconcileCommand
 {
@@ -45,7 +45,26 @@ public static class ReconcileCommand
                 runner,
                 reporter,
                 imageAuth: new ImagePullAuth(config.ImageRegistry, config.ImageRegistryAuth));
-            var engine = new ReconcileEngine(config, store, registry, runtime, new FileSecretResolver(), reporter);
+            var statusKey = LoadStatusKey(config, reporter);
+            var statusRepository = config.StatusRepository ??
+                                   StatusRepository.Derive(config.Project, config.Target);
+            IStatusChannel statusChannel = new StatusArtifactChannel(
+                statusRepository,
+                registry,
+                config.StatusKeys,
+                config.Expectation,
+                statusKey,
+                new StatusStore(config.StateDirectory),
+                reporter);
+            var engine = new ReconcileEngine(
+                config,
+                store,
+                registry,
+                runtime,
+                new FileSecretResolver(),
+                reporter,
+                statusChannel: statusChannel,
+                statusKeyId: statusKey?.KeyId);
             var outcome = await engine.RunOnceAsync(cancellationToken);
 
             if (options.Json)
@@ -67,6 +86,30 @@ public static class ReconcileCommand
                 WriteError(e.Message, (int)ReconcileExitCode.Config);
             return (int)ReconcileExitCode.Config;
         }
+    }
+
+    private static StatusSigningKey? LoadStatusKey(AgentConfig config, Reporter reporter)
+    {
+        if (config.StatusKeyPath is null)
+        {
+            reporter.Warn("status_key is not configured; signed status will not be published");
+            return null;
+        }
+
+        StatusSigningKey key;
+        try
+        {
+            key = StatusSigningKey.Load(config.StatusKeyPath);
+        }
+        catch (AgentConfigException e)
+        {
+            reporter.Warn($"{e.Message}; signed status will not be published");
+            return null;
+        }
+
+        if (!config.StatusKeys.IsEmpty && !config.StatusKeys.TryFind(key.KeyId, out _))
+            reporter.Warn($"status key {key.KeyId} is not registered in status_keys");
+        return key;
     }
 
     private static ReconcileStatusDocument BusyStatus(AgentConfig config, ReconcileStore store)

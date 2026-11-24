@@ -975,12 +975,14 @@ desired_repo = "shop/state/aws-us-east-1-amd64-1a2b3c4d/desired"
 status_repo = "shop/state/aws-us-east-1-amd64-1a2b3c4d/status"
 poll_seconds = 30
 lock_timeout_seconds = 120
+log_redact = ["Bearer ", "password="]
 
 [target]
 provider = "aws"
 region = "us-east-1"
 arch = "amd64"
 selector = { stack = "prod" }
+# log_redact may also be set here; target values replace root values.
 
 mode = "daemon"            # "daemon" or "timer"
 trust_dir = "/etc/narwhal/trust"
@@ -1004,6 +1006,10 @@ password = "<image-registry-password>"
 Bootstrap writes `mode`. In `timer` mode the daemon user unit is disabled and
 the timer user unit is enabled. Both modes run the same engine and produce the
 same status.
+
+`log_redact` is an array of literal strings removed from status error messages
+and bounded log tails before they are signed. It may be set at the root or under
+`[target]`; a target-level array replaces the root-level array.
 
 `agent.toml` must be mode `0600` whenever it contains a plaintext `password` or
 `token`; the loader rejects group- or other-readable files. Prefer
@@ -1431,6 +1437,12 @@ Publishing policy:
 - If the status repository is unreachable or unauthorized, queue the newest
   status in `/var/lib/narwhal/status-queue/`, keeping at most 64 entries and
   dropping the oldest. Publish the newest when connectivity returns.
+- A queued snapshot is republished only when its `(epoch, status_seq)` is
+  strictly older than the snapshot being published. If a queue entry is newer
+  (a crash or rollback race), the engine adopts its epoch and sequence as the
+  ordering baseline, leaves the publish pending, and supersedes it on the next
+  cycle. Equal coordinates keep the fresh snapshot and discard the stale queue
+  entry.
 - Old status manifests become untagged and may be garbage collected. History is
   best effort. The host keeps the last 64 status snapshots locally.
 
@@ -2032,7 +2044,7 @@ desired state.
 | --- | --- | --- |
 | `narwhal deploy [service...] --target <name> [--dry-run] [--generation N] [--no-wait]` | Build and push images, sign and publish the desired artifact, reconcile the provider firewall, wait for signed status | Desired signing key, registry write, target config, provider firewall write |
 | `narwhal reconcile [--target <name>] [--json]` | Run one reconcile cycle locally on the host | Local agent config and state |
-| `narwhal status [--target <name>] [--watch] [--json]` | Fetch, verify, and print signed status | Status public key, registry read |
+| `narwhal status [--target <target_id>] [--json]` | Fetch, verify, and print signed status | Status public key, registry read |
 | `narwhal rollback [--target <name>] [--to-generation N]` | Publish a new generation from the last successfully applied payload, or an explicit verified generation, then reconcile the provider firewall | Desired signing key, registry write, provider firewall write |
 | `narwhal logs [service...] [--target <name>] [--tail N] [--follow] [--json]` | Local container logs without `--target`; remote bounded log tail with `--target` | Local podman or status read |
 | `narwhal targets` | List configured targets and their provider/region/selector/ingress | Local config |
@@ -2100,9 +2112,12 @@ separate `deploy` spec and is already present on the other cloud commands.
 - Fetches status by tag `latest`, verifies the host signature against the
   target's registered `status_keys`, verifies the payload media type and digest,
   parses the status JSON, and prints a table or JSON.
-- `--watch` polls every 5 seconds. It exits `0` only when `phase` is `idle`,
-  `3` for `degraded`, and `5` for `failed`, `replay_rejected`, or a signature
-  failure. It continues on `registry_unavailable`.
+- `--target` is host-local and must equal the derived
+  `<provider>-<region>-<arch>-<selector-hash>` target ID. A mismatch exits `5`
+  without contacting the registry.
+- It exits `0` when `phase` is `idle`, `3` for `degraded`, and `5` for `failed`,
+  `replay_rejected`, or a verification failure. Registry transport failures exit
+  `3`.
 - It never contacts the VM. An unsigned or wrongly signed status is a hard
   failure with exit `5`.
 
@@ -2326,7 +2341,7 @@ Given an attacker has write access to the status repository but not the
 per-host status private key,
 When the attacker pushes a status document with `active.generation=99` and a
 signature made with an unregistered key, or no signature,
-Then `narwhal status --target prod` rejects it with exit `5`, `narwhal deploy`
+Then `narwhal status --target <target_id>` rejects it with exit `5`, `narwhal deploy`
 does not accept it as rollout evidence, and `narwhal rollback` does not use it
 as a generation source. The agent's next legitimate signed status replaces the
 forgery. If the attacker deletes the status, the CLI reports "status missing",
@@ -2745,7 +2760,7 @@ containers, so the restart policy is not the only recovery mechanism.
 ```text
 1. tofu -chdir=infra/aws apply         # VM, identity, registries, ingress, no control ingress
 2. narwhal deploy --target prod        # build/push images, sign/push desired
-3. narwhal status --target prod        # verify host signature and read status
+3. narwhal status --target <target_id> # verify host signature and read status
 4. narwhal logs api --target prod      # bounded, redacted log tail
 5. narwhal rollback --target prod      # publish active payload as a new generation
 ```

@@ -19,6 +19,11 @@ public sealed class ReconcileEngine
     private readonly Reporter _reporter;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly TimeProvider _time;
+    private readonly IStatusChannel? _statusChannel;
+    private readonly string? _statusKeyId;
+    private string? _hostId;
+    private List<string> _cycleSecretValues = [];
+    private readonly string _startedAt;
 
     public ReconcileEngine(
         AgentConfig config,
@@ -28,7 +33,9 @@ public sealed class ReconcileEngine
         ISecretResolver secrets,
         Reporter reporter,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        IStatusChannel? statusChannel = null,
+        string? statusKeyId = null)
     {
         _config = config;
         _store = store;
@@ -38,19 +45,315 @@ public sealed class ReconcileEngine
         _reporter = reporter;
         _delay = delay ?? ((duration, token) => Task.Delay(duration, token));
         _time = time ?? TimeProvider.System;
+        _startedAt = Timestamp(_time.GetUtcNow());
+        _statusChannel = statusChannel;
+        _statusKeyId = statusKeyId;
     }
 
     public async Task<ReconcileOutcome> RunOnceAsync(CancellationToken cancellationToken)
     {
+        _cycleSecretValues = [];
         var started = _time.GetUtcNow();
-        var state = _store.LoadState();
+        var state = _store.LoadStateForRecovery(out var stateLost, out var stateWarning);
+        if (stateWarning is not null)
+            _reporter.Warn(stateWarning);
+
+        var statusStore = new StatusStore(_config.StateDirectory);
+        var history = statusStore.NewestHistory();
+        var queued = statusStore.NewestQueued();
+        _hostId = await HostIdentity.ResolveAsync(
+            _config.Target.Provider,
+            _config.HostId,
+            cancellationToken);
+        var hostIdChanged = _hostId is not null &&
+                            state.LastHostId is not null &&
+                            !string.Equals(_hostId, state.LastHostId, StringComparison.Ordinal);
+        var cacheMissing = state.ActivePayloadDigest is not null &&
+                           !_store.TryLoadArtifact(state.ActivePayloadDigest, out _);
+        var cacheLost = cacheMissing && !state.ArtifactCacheMissing;
+
+        await ApplyStatusOrderingAsync(
+            state,
+            stateLost,
+            history,
+            queued,
+            hostIdChanged || cacheLost,
+            cancellationToken);
+        state.StatusEpoch = state.StatusEpoch == 0 ? 1 : state.StatusEpoch;
+        state.StatusStateLost = state.StatusStateLost || stateLost;
+        state.ArtifactCacheMissing = cacheMissing;
+        if (_hostId is not null)
+            state.LastHostId = _hostId;
+        _store.SaveState(state);
+
+        var status = NewStatus(state, started);
+        var outcome = await RunCycleAsync(state, status, started, stateLost, cancellationToken);
+        return await PublishStatusAsync(state, outcome, cancellationToken);
+    }
+
+    private async Task ApplyStatusOrderingAsync(
+        ReconcileState state,
+        bool stateLost,
+        StatusSnapshot? history,
+        StatusSnapshot? queued,
+        bool identityOrCacheLost,
+        CancellationToken cancellationToken)
+    {
+        VerifiedStatus? remote = null;
+        if (_statusChannel is not null)
+            remote = await _statusChannel.TryReadLatestAsync(cancellationToken);
+
+        var remoteEpoch = remote?.Document.Epoch ?? 0;
+        var remoteSeq = remote?.Document.StatusSeq ?? 0;
+        var baselineEpoch = Math.Max(
+            state.StatusEpoch,
+            Math.Max(
+                state.LastKnownStatusEpoch,
+                Math.Max(remoteEpoch, Math.Max(history?.Epoch ?? 0, queued?.Epoch ?? 0))));
+        var baselineSeq = Math.Max(
+            state.StatusSeq,
+            Math.Max(
+                state.LastKnownStatusSeq,
+                Math.Max(remoteSeq, Math.Max(history?.StatusSeq ?? 0, queued?.StatusSeq ?? 0))));
+
+        state.StatusEpoch = stateLost || identityOrCacheLost
+            ? Math.Max(1, baselineEpoch + 1)
+            : Math.Max(1, baselineEpoch);
+        state.StatusSeq = baselineSeq;
+        state.LastKnownStatusEpoch = Math.Max(state.LastKnownStatusEpoch, baselineEpoch);
+        state.LastKnownStatusSeq = Math.Max(state.LastKnownStatusSeq, baselineSeq);
+        if (remote is null)
+            return;
+
+        state.HighestGeneration = Math.Max(state.HighestGeneration, remote.Document.HighestGeneration);
+        if (stateLost)
+        {
+            state.BlockedGeneration = remote.Document.BlockedGeneration;
+            state.BlockedAgentDigest = remote.Document.Host.BlockedAgentDigest;
+        }
+    }
+
+    private async Task<ReconcileOutcome> PublishStatusAsync(
+        ReconcileState state,
+        ReconcileOutcome outcome,
+        CancellationToken cancellationToken)
+    {
+        if (_statusChannel is null || _statusKeyId is null)
+            return outcome;
+
+        var now = _time.GetUtcNow();
+        if (!StatusPublicationPolicy.ShouldPublish(state, outcome.Status, now))
+            return outcome;
+
+        outcome.Status.StatusSeq = ++state.StatusSeq;
+        outcome.Status.Epoch = state.StatusEpoch;
+        state.LastKnownStatusEpoch = state.StatusEpoch;
+        state.LastKnownStatusSeq = state.StatusSeq;
+        RedactStatus(outcome.Status);
+
+        try
+        {
+            var result = await _statusChannel.PublishAsync(outcome.Status, cancellationToken);
+            if (result.Published)
+            {
+                state.StatusPublishPending = false;
+                state.LastStatusFingerprint = StatusPublicationPolicy.Fingerprint(outcome.Status);
+                state.LastStatusPublishedAt = Timestamp(now);
+            }
+            else
+            {
+                state.StatusPublishPending = true;
+                if (result.Warning is not null)
+                    _reporter.Warn(result.Warning);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            state.StatusPublishPending = true;
+            _reporter.Warn($"status publish failed: {e.Message}");
+        }
+
+        try
+        {
+            _store.SaveState(state);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ReconcileException)
+        {
+            _reporter.Warn($"cannot persist status sequence: {e.Message}");
+        }
+
+        return outcome;
+    }
+
+    private void RedactStatus(ReconcileStatusDocument status)
+    {
+        if (_cycleSecretValues.Count == 0 && _config.LogRedactPatterns.Count == 0)
+            return;
+
+        if (status.LastError is not null)
+        {
+            status.LastError.Message = StatusLogs.RedactText(
+                status.LastError.Message,
+                _cycleSecretValues,
+                _config.LogRedactPatterns);
+        }
+
+        status.LogsTail = StatusLogs.BoundAndRedact(
+            status.LogsTail,
+            _cycleSecretValues,
+            _config.LogRedactPatterns);
+    }
+
+    private string RedactMessage(string message) =>
+        StatusLogs.RedactText(message, _cycleSecretValues, _config.LogRedactPatterns);
+
+    private LastErrorInfo RedactError(LastErrorInfo error) => new()
+    {
+        Code = error.Code,
+        Service = error.Service,
+        Message = RedactMessage(error.Message),
+        At = error.At,
+    };
+
+    private void MergeSecretValues(IEnumerable<ServicePlan>? plans)
+    {
+        if (plans is null)
+            return;
+
+        _cycleSecretValues = _cycleSecretValues
+            .Concat(plans.SelectMany(plan => plan.Secrets).Select(secret => secret.Value))
+            .Where(value => value.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private async Task CaptureFailureLogsAsync(
+        ReconcileStatusDocument status,
+        string? service,
+        CancellationToken cancellationToken)
+    {
+        if (service is null)
+            return;
+
+        try
+        {
+            var container = ReconcileNames.Container(_config.Project, service);
+            var lines = await _runtime.LogsTailAsync(container, 50, cancellationToken);
+            var at = Timestamp(_time.GetUtcNow());
+            var entries = lines.Select(line => new StatusLogLine
+            {
+                Service = service,
+                At = at,
+                Line = StatusLogs.RedactText(line, _cycleSecretValues, _config.LogRedactPatterns),
+            });
+            status.LogsTail = StatusLogs.BoundAndRedact(
+                entries,
+                _cycleSecretValues,
+                _config.LogRedactPatterns);
+        }
+        catch (Exception e) when (e is PodmanException or ProcessFailureException or IOException or UnauthorizedAccessException)
+        {
+            _reporter.Warn($"cannot collect failure logs for '{service}': {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Publishes an in-flight phase. A failure is queued and never changes the cycle outcome.
+    /// </summary>
+    private async Task PublishTransitionAsync(
+        ReconcileState state,
+        ReconcileStatusDocument status,
+        string phase,
+        CancellationToken cancellationToken,
+        LastErrorInfo? error = null)
+    {
+        status.Phase = phase;
+        status.LastError = error ?? state.LastError;
+        status.Updated = Timestamp(_time.GetUtcNow());
+        status.HighestGeneration = state.HighestGeneration;
+        status.BlockedGeneration = state.BlockedGeneration;
+        RedactStatus(status);
+
+        if (_statusChannel is null || _statusKeyId is null)
+            return;
+
+        status.StatusSeq = ++state.StatusSeq;
+        state.LastKnownStatusEpoch = state.StatusEpoch;
+        state.LastKnownStatusSeq = state.StatusSeq;
+        try
+        {
+            _store.SaveState(state);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ReconcileException)
+        {
+            _reporter.Warn($"cannot persist status sequence: {e.Message}");
+        }
+
+        try
+        {
+            var result = await _statusChannel.PublishAsync(status, cancellationToken);
+            if (result.Published)
+            {
+                state.StatusPublishPending = false;
+                state.LastStatusFingerprint = StatusPublicationPolicy.Fingerprint(status);
+                state.LastStatusPublishedAt = Timestamp(_time.GetUtcNow());
+            }
+            else
+            {
+                state.StatusPublishPending = true;
+                if (result.Warning is not null)
+                    _reporter.Warn(result.Warning);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            state.StatusPublishPending = true;
+            _reporter.Warn($"status publish failed: {e.Message}");
+        }
+
+        try
+        {
+            _store.SaveState(state);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ReconcileException)
+        {
+            _reporter.Warn($"cannot persist status sequence: {e.Message}");
+        }
+    }
+
+    private async Task<ReconcileOutcome> RunCycleAsync(
+        ReconcileState state,
+        ReconcileStatusDocument status,
+        DateTimeOffset started,
+        bool stateLost,
+        CancellationToken cancellationToken)
+    {
         var journal = _store.LoadJournal(out var warning);
         if (warning is not null)
+        {
             _reporter.Warn(warning);
-
-        state.StatusEpoch = state.StatusEpoch == 0 ? 1 : state.StatusEpoch;
-        state.StatusSeq++;
-        var status = NewStatus(state, started);
+            var alreadyLost = state.StatusStateLost;
+            state.StatusStateLost = true;
+            if (!alreadyLost)
+            {
+                state.StatusEpoch++;
+                state.LastKnownStatusEpoch = state.StatusEpoch;
+                status.Epoch = state.StatusEpoch;
+                _store.SaveState(state);
+            }
+        }
+        else if (!stateLost)
+        {
+            state.StatusStateLost = false;
+        }
 
         try
         {
@@ -94,6 +397,7 @@ public sealed class ReconcileEngine
                 resolved.Manifest.Bytes);
 
             var plans = await ServicePlanner.BuildAsync(document, _secrets, cancellationToken);
+            MergeSecretValues(plans);
             EnsureBindMounts(plans, path => File.Exists(path) || Directory.Exists(path));
 
             var observations = await _runtime.ListAsync(_config.Project, cancellationToken);
@@ -164,18 +468,24 @@ public sealed class ReconcileEngine
 
             try
             {
-                status.Phase = ReconcilePhases.Applying;
+                var needsPull = imageMatches.Values.Any(match => !match) ||
+                                diff.Changes.Any(change =>
+                                    change.Action is ServiceActions.Create or ServiceActions.Recreate);
+                if (needsPull)
+                    await PublishTransitionAsync(state, status, ReconcilePhases.Pulling, cancellationToken);
+                await PublishTransitionAsync(state, status, ReconcilePhases.Applying, cancellationToken);
                 await ApplyAsync(diff, generation, applyJournal, cancellationToken);
             }
             catch (ApplyFailureException failure)
             {
-                var error = new LastErrorInfo
+                await CaptureFailureLogsAsync(status, failure.Service, cancellationToken);
+                var error = RedactError(new LastErrorInfo
                 {
                     Code = failure.Code,
                     Service = failure.Service,
                     Message = failure.Message,
                     At = Timestamp(_time.GetUtcNow()),
-                };
+                });
                 var failedAction = applyJournal.Actions.FirstOrDefault(action =>
                     string.Equals(action.Service, failure.Service, StringComparison.Ordinal));
                 if (failedAction is not null && failure.MutationStarted)
@@ -196,12 +506,12 @@ public sealed class ReconcileEngine
             }
             catch (Exception e) when (e is PodmanException or RegistryException or ProcessFailureException or IOException)
             {
-                var error = new LastErrorInfo
+                var error = RedactError(new LastErrorInfo
                 {
                     Code = e is RegistryException ? "image_pull_failed" : "apply_failed",
                     Message = e.Message,
                     At = Timestamp(_time.GetUtcNow()),
-                };
+                });
                 applyJournal.Phase = JournalPhases.RollingBack;
                 applyJournal.BlockedGeneration = generation;
                 applyJournal.LastError = error;
@@ -215,6 +525,7 @@ public sealed class ReconcileEngine
                 return await RollbackAsync(state, applyJournal, status, error, cancellationToken);
             }
 
+            await PublishTransitionAsync(state, status, ReconcilePhases.Verifying, cancellationToken);
             try
             {
                 await RemoveOrphansAsync(diff, cancellationToken);
@@ -631,19 +942,6 @@ public sealed class ReconcileEngine
         LastErrorInfo error,
         CancellationToken cancellationToken)
     {
-        state.HighestGeneration = Math.Max(state.HighestGeneration, journal.HighestGeneration);
-        state.BlockedGeneration = journal.Generation;
-        state.LastPayloadDigest = journal.PayloadDigest;
-        state.LastManifestDigest = journal.ManifestDigest;
-        state.Phase = ReconcilePhases.RollingBack;
-        state.LastError = error;
-        _store.SaveState(state);
-
-        journal.Phase = JournalPhases.RollingBack;
-        journal.LastError = error;
-        journal.BlockedGeneration = journal.Generation;
-        _store.SaveJournal(journal);
-
         var activeGeneration = journal.ActiveGeneration ?? state.ActiveGeneration;
         var activeDigest = state.ActivePayloadDigest ?? journal.ActivePayloadDigest;
         IReadOnlyList<ServicePlan>? previousPlans = null;
@@ -669,6 +967,24 @@ public sealed class ReconcileEngine
                 _reporter.Warn($"cannot use the cached active payload for rollback: {e.Message}");
             }
         }
+
+        MergeSecretValues(previousPlans);
+        error = RedactError(error);
+
+        state.HighestGeneration = Math.Max(state.HighestGeneration, journal.HighestGeneration);
+        state.BlockedGeneration = journal.Generation;
+        state.LastPayloadDigest = journal.PayloadDigest;
+        state.LastManifestDigest = journal.ManifestDigest;
+        state.Phase = ReconcilePhases.RollingBack;
+        state.LastError = error;
+        _store.SaveState(state);
+
+        journal.Phase = JournalPhases.RollingBack;
+        journal.LastError = error;
+        journal.BlockedGeneration = journal.Generation;
+        _store.SaveJournal(journal);
+
+        await PublishTransitionAsync(state, status, ReconcilePhases.RollingBack, cancellationToken, error);
 
         var changed = journal.Actions
             .Where(action => action.Touched &&
@@ -786,15 +1102,15 @@ public sealed class ReconcileEngine
             _ => ReconcilePhases.Failed,
         };
 
-        var error = code == CloudArtifactErrorCodes.GenerationBlocked && state.RollbackFailed
-            ? priorError
-            : new LastErrorInfo
+        var error = code == CloudArtifactErrorCodes.GenerationBlocked && state.RollbackFailed && priorError is not null
+            ? RedactError(priorError)
+            : RedactError(new LastErrorInfo
             {
                 Code = code,
                 Service = service,
-                Message = message,
+                Message = RedactMessage(message),
                 At = Timestamp(_time.GetUtcNow()),
-            };
+            });
         state.Phase = phase;
         state.LastError = error;
         try
@@ -824,7 +1140,7 @@ public sealed class ReconcileEngine
             }
             : null;
         Finish(status, state);
-        _reporter.Error(message);
+        _reporter.Error(error.Message);
         return new ReconcileOutcome(status, exitCode);
     }
 
@@ -966,8 +1282,10 @@ public sealed class ReconcileEngine
         Updated = Timestamp(started),
         Host = new StatusHost
         {
+            Id = _hostId,
             BootId = TryReadBootId(),
-            StartedAt = Timestamp(started),
+            StartedAt = _startedAt,
+            StatusKeyId = _statusKeyId,
             AgentRollbackVersion = state.AgentRollbackVersion,
             BlockedAgentDigest = state.BlockedAgentDigest,
         },

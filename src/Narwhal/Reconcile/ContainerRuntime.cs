@@ -55,6 +55,7 @@ public interface IContainerRuntime
     Task EnsureSecretAsync(string name, string value, CancellationToken cancellationToken);
     Task<string?> StateAsync(string containerName, CancellationToken cancellationToken);
     Task<string?> HealthAsync(string containerName, CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> LogsTailAsync(string containerName, int lines, CancellationToken cancellationToken);
 }
 
 /// <summary>Podman implementation of the reconcile runtime.</summary>
@@ -451,6 +452,24 @@ public sealed class PodmanRuntime(
             cancellationToken);
         if (!result.Ok)
             throw new PodmanException($"failed to store podman secret '{name}'");
+    }
+
+    public async Task<IReadOnlyList<string>> LogsTailAsync(
+        string containerName,
+        int lines,
+        CancellationToken cancellationToken)
+    {
+        var result = await runner.RunAsync(
+            Executable,
+            ["logs", "--tail", lines.ToString(CultureInfo.InvariantCulture), containerName],
+            new ProcessOptions(),
+            cancellationToken);
+        if (!result.Ok)
+            throw new PodmanException($"failed to read logs for '{containerName}':\n{result.Combined.TrimEnd()}");
+
+        return result.Combined
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
     }
 
     public async Task StartAsync(string containerName, CancellationToken cancellationToken)
