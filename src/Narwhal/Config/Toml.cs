@@ -624,8 +624,11 @@ public sealed class TomlParser
                 throw Error("invalid unicode escape");
             Advance();
         }
-        var code = Convert.ToInt32(_text[start.._pos], 16);
-        return char.ConvertFromUtf32(code);
+        var code = Convert.ToInt64(_text[start.._pos], 16);
+        if (code > 0x10FFFF || code is >= 0xD800 and <= 0xDFFF)
+            throw Error("invalid unicode escape");
+
+        return char.ConvertFromUtf32((int)code);
     }
 
     private void ExpectLineEnd()

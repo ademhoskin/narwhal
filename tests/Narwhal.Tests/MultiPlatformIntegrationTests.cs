@@ -42,6 +42,12 @@ public class MultiPlatformIntegrationTests
         Assert.Equal(0, plan.Code);
         using (var document = JsonDocument.Parse(plan.Out))
         {
+            Assert.Equal("multi", document.RootElement.GetProperty("project").GetString());
+            Assert.Equal(Path.Combine(box.DirectoryPath, "narwhal.toml"),
+                document.RootElement.GetProperty("manifest").GetString());
+            Assert.Equal(box.LockPath, document.RootElement.GetProperty("lock").GetString());
+            Assert.False(document.RootElement.GetProperty("lock_stale").GetBoolean());
+
             var systems = document.RootElement.GetProperty("systems")
                 .EnumerateArray().Select(e => e.GetString()).ToList();
             Assert.Equal([Foreign(), Host()], systems);
@@ -49,9 +55,19 @@ public class MultiPlatformIntegrationTests
             var service = document.RootElement.GetProperty("services").EnumerateArray().Single();
             Assert.Equal("web", service.GetProperty("name").GetString());
             var locked = service.GetProperty("platforms");
-            Assert.Equal(NixPlatform.ToOciPlatform(Host()),
-                locked.GetProperty(Host()).GetProperty("platform").GetString());
-            Assert.True(locked.TryGetProperty(Foreign(), out _));
+            Assert.True(locked.TryGetProperty(Host(), out _), $"plan JSON is missing platform '{Host()}'");
+            Assert.True(locked.TryGetProperty(Foreign(), out _), $"plan JSON is missing platform '{Foreign()}'");
+
+            foreach (var system in new[] { Host(), Foreign() })
+            {
+                var entry = locked.GetProperty(system);
+                Assert.Equal(NixPlatform.ToOciPlatform(system), entry.GetProperty("platform").GetString());
+                Assert.Equal($"narwhal.images.{system}.web", entry.GetProperty("attr").GetString());
+                Assert.Equal("locked", entry.GetProperty("status").GetString());
+                var digest = entry.GetProperty("digest").GetString();
+                Assert.False(string.IsNullOrWhiteSpace(digest), $"plan JSON has no digest for '{system}'");
+                Assert.NotEqual("-", digest);
+            }
         }
 
         var verify = box.Run("verify", "--no-load");

@@ -183,4 +183,24 @@ public class TomlTests
         Assert.Equal("crlf", Str(table, "name"));
         Assert.Equal(2, Assert.IsType<TomlInteger>(table.Get("count")).Value);
     }
+
+    [Theory]
+    [InlineData(@"value = ""\U0001F600""", "\U0001F600")]
+    [InlineData(@"value = ""\U000000E9""", "\u00e9")]
+    public void ParsesEightDigitUnicodeEscapes(string document, string expected)
+    {
+        var table = Parse(document);
+        Assert.Equal(expected, Str(table, "value"));
+    }
+
+    [Fact]
+    public void AcceptsTheMaximumUnicodeScalarAsASurrogatePair()
+    {
+        var table = Parse(@"value = ""\U0010FFFF""");
+        var value = Str(table, "value");
+
+        Assert.Equal(2, value.Length);
+        Assert.Equal(0x10FFFF, char.ConvertToUtf32(value, 0));
+        Assert.Equal(char.ConvertFromUtf32(0x10FFFF), value);
+    }
 }
