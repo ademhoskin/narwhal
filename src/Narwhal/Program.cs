@@ -5,6 +5,7 @@ using Narwhal.Commands;
 using Narwhal.Config;
 using Narwhal.Nix;
 using Narwhal.Podman;
+using Narwhal.Reconcile;
 
 namespace Narwhal;
 
@@ -82,6 +83,14 @@ public static class App
         {
             return Fail(options, "error: " + e.Message, 4);
         }
+        catch (AgentConfigException e)
+        {
+            return Fail(options, "error: " + e.Message, 1);
+        }
+        catch (ReconcileException e)
+        {
+            return Fail(options, "error: " + e.Message, (int)e.ExitCode);
+        }
         catch (OperationCanceledException)
         {
             return Fail(options, "interrupted", 130);
@@ -103,6 +112,8 @@ public static class App
                 return 0;
             case "init":
                 return InitCommand.Run(options, reporter);
+            case "reconcile":
+                return await ReconcileCommand.RunAsync(options, reporter, cancellationToken);
         }
 
         var context = CommandContext.Create(options);

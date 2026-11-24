@@ -1,5 +1,10 @@
 variable "project" {
   type = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$", var.project))
+    error_message = "project must match the manifest rule ^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$."
+  }
 }
 
 variable "target_name" {
@@ -11,13 +16,19 @@ variable "region" {
 }
 
 variable "trust_keys" {
-  description = "Boot pins: map of key id to Ed25519 public key."
-  type        = map(string)
+  description = "Boot pins: map of 16-hex key id to public_key and not_after."
+  type = map(object({
+    public_key = string
+    not_after  = string
+  }))
 }
 
 variable "status_keys" {
-  description = "Registered status public keys: map of key id to Ed25519 public key."
-  type        = map(string)
+  description = "Registered status public keys: map of 16-hex key id to public_key and not_after."
+  type = map(object({
+    public_key = string
+    not_after  = string
+  }))
 }
 
 variable "status_key_secret" {

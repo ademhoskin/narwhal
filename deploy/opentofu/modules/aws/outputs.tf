@@ -4,7 +4,7 @@ output "target" {
     provider = "aws"
     region   = var.region
     arch     = var.arch
-    selector = { stack = var.target_name }
+    selector = local.selector
     id       = local.target_id
   }
 }

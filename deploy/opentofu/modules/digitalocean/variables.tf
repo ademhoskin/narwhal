@@ -3,8 +3,8 @@ variable "project" {
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?$", var.project))
-    error_message = "project must be 1-30 lowercase alphanumeric characters or hyphens and must start and end alphanumeric."
+    condition     = can(regex("^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$", var.project))
+    error_message = "project must match the manifest rule ^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$."
   }
 }
 
@@ -35,28 +35,38 @@ variable "arch" {
 }
 
 variable "trust_keys" {
-  description = "Boot pins for desired-state signing: map of key id to Ed25519 public key."
-  type        = map(string)
+  description = "Boot pins for desired-state signing: map of 16-hex key id to the 32-byte Ed25519 public key and its not_after timestamp."
+  type = map(object({
+    public_key = string
+    not_after  = string
+  }))
 
   validation {
     condition = length(var.trust_keys) > 0 && alltrue([
       for id, key in var.trust_keys :
-      can(regex("^[A-Za-z0-9._-]{1,64}$", id)) && length(trimspace(key)) > 0
+      can(regex("^[0-9a-f]{16}$", id)) &&
+      can(regex("^[A-Za-z0-9+/]{43}=$", key.public_key)) &&
+      can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", key.not_after))
     ])
-    error_message = "trust_keys must be non-empty; key ids may contain only alphanumerics, dot, underscore, and hyphen."
+    error_message = "trust_keys must be non-empty with 16-hex key ids, base64 32-byte public keys, and RFC 3339 UTC not_after values."
   }
 }
 
 variable "status_keys" {
-  description = "Registered per-host status signing public keys: map of key id to Ed25519 public key."
-  type        = map(string)
+  description = "Registered per-host status signing public keys: map of 16-hex key id to the 32-byte Ed25519 public key and its not_after timestamp."
+  type = map(object({
+    public_key = string
+    not_after  = string
+  }))
 
   validation {
     condition = length(var.status_keys) > 0 && alltrue([
       for id, key in var.status_keys :
-      can(regex("^[A-Za-z0-9._-]{1,64}$", id)) && length(trimspace(key)) > 0
+      can(regex("^[0-9a-f]{16}$", id)) &&
+      can(regex("^[A-Za-z0-9+/]{43}=$", key.public_key)) &&
+      can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", key.not_after))
     ])
-    error_message = "status_keys must be non-empty; key ids may contain only alphanumerics, dot, underscore, and hyphen."
+    error_message = "status_keys must be non-empty with 16-hex key ids, base64 32-byte public keys, and RFC 3339 UTC not_after values."
   }
 }
 
@@ -145,22 +155,37 @@ variable "image_registry" {
   description = "Optional image registry endpoint override. Defaults to the DOCR endpoint."
   type        = string
   default     = ""
+
+  validation {
+    condition     = var.image_registry == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)*$", var.image_registry))
+    error_message = "image_registry must be host or host/path without a scheme, explicit port, trailing slash, or empty path segment."
+  }
 }
 
 variable "state_registry" {
-  description = "External state registry endpoint. DOCR must not be used for state; supply a non-DOCR registry (or a separate DigitalOcean account registry)."
+  description = "State registry endpoint for desired and status artifacts. It must differ from image_registry and use its own credential. Same-account DOCR is forbidden; a DOCR registry in a separate DigitalOcean account is allowed only with allow_docr_state_registry = true."
   type        = string
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]*$", var.state_registry)) && !can(regex("://", var.state_registry))
-    error_message = "state_registry must be a registry host or host/path without a URL scheme or trailing slash."
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)*$", var.state_registry))
+    error_message = "state_registry must be host or host/path without a scheme, explicit port, trailing slash, or empty path segment."
   }
+}
+
+variable "allow_docr_state_registry" {
+  description = "Permit a DOCR state registry only when it belongs to a separate DigitalOcean account with its own credential. Same-account DOCR is never valid. Requires state_registry_credential_secret_name."
+  type        = bool
+  default     = false
 }
 
 variable "state_registry_credential_secret_name" {
   description = "DigitalOcean Secrets Manager secret name holding the external state registry credential. Read at runtime with bootstrap_token."
   type        = string
-  default     = ""
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", var.state_registry_credential_secret_name))
+    error_message = "state_registry_credential_secret_name is required for the external state registry."
+  }
 }
 
 variable "registry_name" {

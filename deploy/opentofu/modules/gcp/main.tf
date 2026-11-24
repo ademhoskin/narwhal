@@ -15,13 +15,13 @@ resource "google_compute_subnetwork" "target" {
   ip_cidr_range = var.subnet_cidr
 }
 
-resource "google_compute_firewall" "egress" {
+resource "google_compute_firewall" "egress_allow" {
   project            = var.gcp_project
-  name               = local.firewall_name
+  name               = local.egress_allow_name
   network            = google_compute_network.target.id
   direction          = "EGRESS"
   priority           = 1000
-  description        = "narwhal ${local.target_id}: egress 443 and DNS only; ingress is empty and managed by narwhal deploy"
+  description        = "narwhal ${local.target_id}: bootstrap and registry egress; ingress is empty and managed by narwhal deploy"
   destination_ranges = ["0.0.0.0/0"]
 
   allow {
@@ -38,6 +38,30 @@ resource "google_compute_firewall" "egress" {
     protocol = "udp"
     ports    = ["53"]
   }
+
+  allow {
+    protocol = "tcp"
+    ports    = ["80"]
+  }
+
+  allow {
+    protocol = "udp"
+    ports    = ["123"]
+  }
+}
+
+resource "google_compute_firewall" "egress_deny" {
+  project            = var.gcp_project
+  name               = local.egress_deny_name
+  network            = google_compute_network.target.id
+  direction          = "EGRESS"
+  priority           = 65000
+  description        = "narwhal ${local.target_id}: deny all other egress"
+  destination_ranges = ["0.0.0.0/0"]
+
+  deny {
+    protocol = "all"
+  }
 }
 
 resource "google_compute_address" "target" {
@@ -46,6 +70,8 @@ resource "google_compute_address" "target" {
   project = var.gcp_project
   name    = local.address_name
   region  = var.region
+
+  depends_on = [google_project_service.required]
 }
 
 module "host" {
@@ -128,4 +154,6 @@ resource "google_logging_project_sink" "target" {
   destination            = var.log_sink_destination
   filter                 = var.log_sink_filter
   unique_writer_identity = true
+
+  depends_on = [google_project_service.required]
 }

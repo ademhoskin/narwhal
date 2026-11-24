@@ -1,8 +1,10 @@
 locals {
-  target_id    = "${var.project}-${var.target_name}"
-  name_prefix  = "${local.target_id}-"
-  iam_prefix   = substr(local.target_id, 0, 32)
-  ecr_endpoint = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+  selector      = { stack = var.target_name }
+  selector_hash = substr(sha256(jsonencode(local.selector)), 0, 8)
+  target_id     = lower(replace("aws-${var.region}-${var.arch}-${local.selector_hash}", "/[^a-z0-9-]/", "-"))
+  name_prefix   = "${local.target_id}-"
+  iam_prefix    = substr(local.target_id, 0, 32)
+  ecr_endpoint  = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
 
   image_registry = var.image_registry != "" ? var.image_registry : local.ecr_endpoint
   state_registry = var.state_registry != "" ? var.state_registry : local.ecr_endpoint

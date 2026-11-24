@@ -29,7 +29,13 @@ module "target" {
   service_images                        = var.service_images
   bootstrap_payload_ref                 = var.bootstrap_payload_ref
   state_registry                        = var.state_registry
+  allow_docr_state_registry             = var.allow_docr_state_registry
   state_registry_credential_secret_name = var.state_registry_credential_secret_name
+  registry_name                         = var.registry_name
+  image_registry                        = var.image_registry
+  registry_tier                         = var.registry_tier
+  droplet_size                          = var.droplet_size
+  vpc_ip_range                          = var.vpc_ip_range
 
   enable_reserved_ip   = var.enable_reserved_ip
   enable_monitor_alert = var.enable_monitor_alert

@@ -2,12 +2,19 @@ project     = "example"
 target_name = "prod"
 region      = "nyc3"
 
+# key_id = first 8 bytes of SHA-256 of the 32-byte public key, lowercase hex.
 trust_keys = {
-  "operator-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+  "201db1564e14cd54" = {
+    public_key = "jcwpgrFga1Qzz+g055zbuOFNvz00kASlipHQxpN/mJo="
+    not_after  = "2027-11-24T00:00:00Z"
+  }
 }
 
 status_keys = {
-  "host-2026-11" = "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+  "b222287915d43a31" = {
+    public_key = "tDViYUCWQRNE0e1QeMNHMiqZSH7N67syFPk0vw2p8X8="
+    not_after  = "2027-11-24T00:00:00Z"
+  }
 }
 
 status_key_secret_name = "narwhal-example-prod-status-key"
@@ -15,13 +22,16 @@ status_key_secret_name = "narwhal-example-prod-status-key"
 # bootstrap_token is intentionally not stored here. Set TOFU_VAR_bootstrap_token
 # in the environment with a least-privilege token (secret:read and image pull).
 
-# State must not live in DOCR. Use a separate registry account or endpoint.
+# State must be separate from the image registry and use its own credential.
+# A DOCR state registry is allowed only with allow_docr_state_registry = true
+# when that DOCR belongs to a different DigitalOcean account.
 state_registry = "ghcr.io"
 state_registry_credential_secret_name = "narwhal-example-prod-state-registry"
+allow_docr_state_registry = false
 
 agent_image         = "registry.digitalocean.com/example/narwhald"
-agent_digest        = "sha256:REPLACE_WITH_64_HEX_CHARACTERS"
-agent_binary_sha256 = "REPLACE_WITH_64_HEX_CHARACTERS"
+agent_digest        = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+agent_binary_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 agent_mode          = "daemon"
 
 service_images = ["api"]

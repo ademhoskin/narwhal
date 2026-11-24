@@ -1,9 +1,23 @@
 locals {
-  target_id = "${var.project}-${var.target_name}"
+  selector      = { stack = var.target_name }
+  selector_hash = substr(sha256(jsonencode(local.selector)), 0, 8)
+  target_id     = lower(replace("digitalocean-${var.region}-${var.arch}-${local.selector_hash}", "/[^a-z0-9-]/", "-"))
 
-  registry_name  = var.registry_name != "" ? var.registry_name : var.project
-  image_registry = var.image_registry != "" ? var.image_registry : "registry.digitalocean.com/${local.registry_name}"
-  state_registry = trimsuffix(var.state_registry, "/")
+  registry_name        = var.registry_name != "" ? var.registry_name : trim(substr(replace(replace(var.project, ".", "-"), "_", "-"), 0, 63), "-")
+  image_registry_raw   = var.image_registry != "" ? var.image_registry : "registry.digitalocean.com/${local.registry_name}"
+  state_registry_raw   = var.state_registry
+  image_registry_parts = split("/", trimsuffix(local.image_registry_raw, "/"))
+  state_registry_parts = split("/", trimsuffix(local.state_registry_raw, "/"))
+
+  image_registry_host = replace(lower(local.image_registry_parts[0]), "/\\.+$/", "")
+  state_registry_host = replace(lower(local.state_registry_parts[0]), "/\\.+$/", "")
+  image_registry_path = join("/", slice(local.image_registry_parts, 1, length(local.image_registry_parts)))
+  state_registry_path = join("/", slice(local.state_registry_parts, 1, length(local.state_registry_parts)))
+
+  image_registry = local.image_registry_path == "" ? local.image_registry_host : "${local.image_registry_host}/${local.image_registry_path}"
+  state_registry = local.state_registry_path == "" ? local.state_registry_host : "${local.state_registry_host}/${local.state_registry_path}"
+
+  state_registry_is_docr = local.state_registry_host == "registry.digitalocean.com" || endswith(local.state_registry_host, ".registry.digitalocean.com")
 
   desired_repo_name = "${var.project}/state/${local.target_id}/desired"
   status_repo_name  = "${var.project}/state/${local.target_id}/status"

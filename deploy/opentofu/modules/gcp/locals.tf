@@ -1,13 +1,16 @@
 locals {
-  target_id = "${var.project}-${var.target_name}"
-  zone      = var.zone != "" ? var.zone : "${var.region}-a"
+  selector      = { stack = var.target_name }
+  selector_hash = substr(sha256(jsonencode(local.selector)), 0, 8)
+  target_id     = lower(replace("gcp-${var.region}-${var.arch}-${local.selector_hash}", "/[^a-z0-9-]/", "-"))
+  zone          = var.zone != "" ? var.zone : "${var.region}-a"
 
-  name_base     = trim(substr("nw-${local.target_id}", 0, 63), "-")
-  sa_id         = trim(substr("nw-${local.target_id}", 0, 30), "-")
-  address_name  = trim(substr("${local.name_base}-ip", 0, 63), "-")
-  sink_name     = trim(substr("${local.name_base}-logs", 0, 63), "-")
-  subnet_name   = trim(substr("${local.name_base}-subnet", 0, 63), "-")
-  firewall_name = trim(substr("${local.name_base}-egress", 0, 63), "-")
+  name_base         = trim(substr("nw-${local.target_id}", 0, 63), "-")
+  sa_id             = trim(substr("nw-${local.target_id}", 0, 30), "-")
+  address_name      = trim(substr("${local.name_base}-ip", 0, 63), "-")
+  sink_name         = trim(substr("${local.name_base}-logs", 0, 63), "-")
+  subnet_name       = trim(substr("${local.name_base}-subnet", 0, 63), "-")
+  egress_allow_name = trim(substr("${local.name_base}-egress-allow", 0, 63), "-")
+  egress_deny_name  = trim(substr("${local.name_base}-egress-deny", 0, 63), "-")
 
   registry_base  = "${var.region}-docker.pkg.dev/${var.gcp_project}"
   image_registry = var.image_registry != "" ? var.image_registry : "${local.registry_base}/${var.image_repository_name}"
@@ -20,7 +23,7 @@ locals {
   status_repo  = "${var.status_repository_name}/${local.status_repo_name}"
 
   labels = merge(var.labels, {
-    "narwhal-project" = var.project
+    "narwhal-project" = trim(substr(replace(var.project, ".", "-"), 0, 63), "-")
     "narwhal-target"  = var.target_name
   })
 

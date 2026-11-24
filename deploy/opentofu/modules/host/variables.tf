@@ -1,19 +1,25 @@
 variable "bootstrap" {
   description = "Public bootstrap payload written to /etc/narwhal/bootstrap.json."
   type = object({
-    provider                         = string
-    project                          = string
-    target_id                        = string
-    desired_repo                     = string
-    status_repo                      = string
-    mode                             = string
-    image_registry                   = string
-    state_registry                   = string
-    agent_image                      = string
-    agent_digest                     = string
-    agent_binary_sha256              = string
-    trust_keys                       = map(string)
-    status_keys                      = map(string)
+    provider            = string
+    project             = string
+    target_id           = string
+    desired_repo        = string
+    status_repo         = string
+    mode                = string
+    image_registry      = string
+    state_registry      = string
+    agent_image         = string
+    agent_digest        = string
+    agent_binary_sha256 = string
+    trust_keys = map(object({
+      public_key = string
+      not_after  = string
+    }))
+    status_keys = map(object({
+      public_key = string
+      not_after  = string
+    }))
     payload_ref                      = optional(string, "")
     status_key_secret                = optional(string, "")
     state_registry_credential_secret = optional(string, "")

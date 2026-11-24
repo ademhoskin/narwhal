@@ -57,6 +57,11 @@ resource "digitalocean_droplet" "target" {
       condition     = length(module.host.user_data) < 65536
       error_message = "The rendered user-data exceeds the 64 KB DigitalOcean limit."
     }
+
+    precondition {
+      condition     = local.state_registry != local.image_registry && (var.allow_docr_state_registry || !local.state_registry_is_docr)
+      error_message = "state_registry must differ from image_registry; a DOCR state registry requires allow_docr_state_registry = true and a separate-account credential."
+    }
   }
 }
 

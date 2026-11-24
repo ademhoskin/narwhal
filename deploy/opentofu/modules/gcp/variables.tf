@@ -3,8 +3,8 @@ variable "project" {
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?$", var.project))
-    error_message = "project must be 1-30 lowercase alphanumeric characters or hyphens and must start and end alphanumeric."
+    condition     = can(regex("^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$", var.project))
+    error_message = "project must match the manifest rule ^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$."
   }
 }
 
@@ -56,28 +56,38 @@ variable "arch" {
 }
 
 variable "trust_keys" {
-  description = "Boot pins for desired-state signing: map of key id to Ed25519 public key."
-  type        = map(string)
+  description = "Boot pins for desired-state signing: map of 16-hex key id to the 32-byte Ed25519 public key and its not_after timestamp."
+  type = map(object({
+    public_key = string
+    not_after  = string
+  }))
 
   validation {
     condition = length(var.trust_keys) > 0 && alltrue([
       for id, key in var.trust_keys :
-      can(regex("^[A-Za-z0-9._-]{1,64}$", id)) && length(trimspace(key)) > 0
+      can(regex("^[0-9a-f]{16}$", id)) &&
+      can(regex("^[A-Za-z0-9+/]{43}=$", key.public_key)) &&
+      can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", key.not_after))
     ])
-    error_message = "trust_keys must be non-empty; key ids may contain only alphanumerics, dot, underscore, and hyphen."
+    error_message = "trust_keys must be non-empty with 16-hex key ids, base64 32-byte public keys, and RFC 3339 UTC not_after values."
   }
 }
 
 variable "status_keys" {
-  description = "Registered per-host status signing public keys: map of key id to Ed25519 public key."
-  type        = map(string)
+  description = "Registered per-host status signing public keys: map of 16-hex key id to the 32-byte Ed25519 public key and its not_after timestamp."
+  type = map(object({
+    public_key = string
+    not_after  = string
+  }))
 
   validation {
     condition = length(var.status_keys) > 0 && alltrue([
       for id, key in var.status_keys :
-      can(regex("^[A-Za-z0-9._-]{1,64}$", id)) && length(trimspace(key)) > 0
+      can(regex("^[0-9a-f]{16}$", id)) &&
+      can(regex("^[A-Za-z0-9+/]{43}=$", key.public_key)) &&
+      can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", key.not_after))
     ])
-    error_message = "status_keys must be non-empty; key ids may contain only alphanumerics, dot, underscore, and hyphen."
+    error_message = "status_keys must be non-empty with 16-hex key ids, base64 32-byte public keys, and RFC 3339 UTC not_after values."
   }
 }
 

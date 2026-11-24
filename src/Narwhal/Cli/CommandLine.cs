@@ -71,6 +71,8 @@ public static class CommandLine
         new("logs", "show container logs",
             "narwhal logs [service...] [--follow] [--tail <lines>] [--timestamps]",
             ["tail"], ["follow", "timestamps"]),
+        new("reconcile", "run one reconcile cycle on this host",
+            "narwhal reconcile [--config <path>] [--json]", ["config"], []),
         new("push", "push built images to their registries",
             "narwhal push [service...] [--system <system>]...", ["system"], []),
         new("verify", "rebuild and prove images match the lock file",

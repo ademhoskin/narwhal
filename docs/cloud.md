@@ -986,11 +986,35 @@ mode = "daemon"            # "daemon" or "timer"
 trust_dir = "/etc/narwhal/trust"
 state_dir = "/var/lib/narwhal"
 status_key = "/etc/narwhal/status-key"
+
+[registry_auth]
+# State-registry credential. Accepts username/password, token, credential_helper,
+# and insecure, or NARWHAL_REGISTRY_USERNAME, _PASSWORD, _TOKEN,
+# _CREDENTIAL_HELPER, and _INSECURE.
+token = "<state-registry-token>"
+
+[image_registry_auth]
+# Image-pull credential when the image registry differs from the state registry.
+# Accepts the same keys, or NARWHAL_IMAGE_REGISTRY_USERNAME, _PASSWORD, _TOKEN,
+# _CREDENTIAL_HELPER, and _INSECURE.
+username = "<image-registry-user>"
+password = "<image-registry-password>"
 ```
 
 Bootstrap writes `mode`. In `timer` mode the daemon user unit is disabled and
 the timer user unit is enabled. Both modes run the same engine and produce the
 same status.
+
+`agent.toml` must be mode `0600` whenever it contains a plaintext `password` or
+`token`; the loader rejects group- or other-readable files. Prefer
+`credential_helper` or the `NARWHAL_*` environment variables to avoid storing a
+plaintext secret in the file.
+
+When `image_registry` equals the effective desired-state registry
+(`state_registry ?? image_registry`) and `[image_registry_auth]` and
+`NARWHAL_IMAGE_REGISTRY_*` are unset, the `[registry_auth]` credential is reused
+for image pulls. An explicit `[image_registry_auth]` table or any
+`NARWHAL_IMAGE_REGISTRY_*` variable overrides that reuse.
 
 ### 3.2 Loop
 
@@ -1425,6 +1449,13 @@ operator/CI credential has push on desired and image repositories and should not
 be present on the VM. The state registry credential is separate from the image
 registry credential when the provider requires it.
 
+State-registry access uses `[registry_auth]` or `NARWHAL_REGISTRY_*` variables.
+Image pulls use `[image_registry_auth]` or `NARWHAL_IMAGE_REGISTRY_*` variables.
+When the image registry is the effective desired-state registry and no image
+credential is configured, the state-registry credential is reused; an explicit
+image credential overrides reuse. Credentials are never taken from ambient
+podman or Docker configuration.
+
 Registry authentication is OCI Distribution bearer-token flow:
 
 1. `GET /v2/` returns `401` with `WWW-Authenticate: Bearer realm=...,service=...`.
@@ -1595,7 +1626,7 @@ The design chooses separation rather than accepting account-wide state writes:
 | Firewall write | The deploy principal needs `compute.firewalls.get`, `create`, `update`, and `delete` on the target project or a custom role with those permissions. The instance service account does not get them. |
 | Registry | Artifact Registry, with `google_artifact_registry_repository` resources for images and state in Docker format. Docker authentication uses username `oauth2accesstoken` and the metadata-server access token. |
 | Status write | `roles/artifactregistry.writer` on the status repository only. Reader on desired and image repositories. |
-| OpenTofu | `google_compute_instance`, `google_service_account`, `google_project_iam_member`, `google_compute_network`, `google_compute_subnetwork`, `google_compute_firewall` for egress 443 and DNS only (no control-plane or data-plane ingress), `google_artifact_registry_repository`, optional `google_compute_address`, optional `google_logging_project_sink`. |
+| OpenTofu | `google_compute_instance`, `google_service_account`, `google_project_iam_member`, `google_compute_network`, `google_compute_subnetwork`, `google_compute_firewall` for egress TCP 443, TCP 80, TCP/UDP 53, and UDP 123 only (no control-plane or data-plane ingress), `google_artifact_registry_repository`, optional `google_compute_address`, optional `google_logging_project_sink`. |
 | Optional logging | Cloud Logging agent or an outbound shipper. Narwhal status carries only a bounded log tail. |
 
 GCP notes:

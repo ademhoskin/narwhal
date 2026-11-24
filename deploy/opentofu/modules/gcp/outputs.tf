@@ -4,7 +4,7 @@ output "target" {
     provider = "gcp"
     region   = var.region
     arch     = var.arch
-    selector = { stack = var.target_name }
+    selector = local.selector
     id       = local.target_id
     zone     = local.zone
   }
@@ -16,9 +16,9 @@ output "public_address" {
 }
 
 output "firewall" {
-  description = "Managed egress firewall. There is no ingress rule; narwhal deploy creates ingress rules after bootstrap."
+  description = "Managed egress allow firewall rule. A priority-65000 deny-all rule restricts remaining egress; there is no ingress rule and narwhal deploy creates ingress rules after bootstrap."
   value = {
-    id   = google_compute_firewall.egress.id
+    id   = google_compute_firewall.egress_allow.id
     kind = "google_compute_firewall"
   }
 }

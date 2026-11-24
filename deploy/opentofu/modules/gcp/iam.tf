@@ -35,6 +35,8 @@ resource "google_secret_manager_secret_iam_member" "status_key" {
   secret_id = var.status_key_secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.target.email}"
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_secret_manager_secret_iam_member" "workload_secrets" {
@@ -44,6 +46,8 @@ resource "google_secret_manager_secret_iam_member" "workload_secrets" {
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.target.email}"
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_project_iam_member" "logging_writer" {
@@ -52,4 +56,6 @@ resource "google_project_iam_member" "logging_writer" {
   project = var.gcp_project
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.target.email}"
+
+  depends_on = [google_project_service.required]
 }

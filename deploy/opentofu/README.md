@@ -28,24 +28,25 @@ All three modules accept this shared surface:
 
 | Input | Meaning |
 | --- | --- |
-| `project` | narwhal project name, used in registry paths |
+| `project` | narwhal project name, used in registry paths; matches the manifest rule `^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$` |
 | `target_name` | target name, exposed as `target.selector.stack` |
 | `region` | provider region |
 | `arch` | must be `amd64` |
-| `trust_keys` | boot pins, map of key id to desired-signing public key |
-| `status_keys` | registered per-host status public keys |
+| `trust_keys` | boot pins, map of 16-hex key id to `{ public_key = base64(32-byte Ed25519 key), not_after = RFC3339 Z }` |
+| `status_keys` | registered per-host status keys, same map shape |
 | `status_key_secret` / `status_key_secret_name` / `status_key_secret_id` | provider secret-service reference to the private status key |
 | `agent_image`, `agent_digest`, `agent_binary_sha256` | digest-pinned agent boot pins |
 | `agent_mode` | `daemon` or `timer` |
 | `service_images` | service image names that need registry repositories |
 | `image_registry`, `state_registry` | optional registry endpoint overrides |
 | `bootstrap_payload_ref` | optional opaque reference to an external bootstrap payload |
+| `allow_docr_state_registry` | DigitalOcean only; permits a DOCR state registry in a separate DigitalOcean account when true |
 
 Each module exposes the same outputs:
 
 | Output | Contents |
 | --- | --- |
-| `target` | `{ provider, region, arch, selector = { stack }, id }` |
+| `target` | `{ provider, region, arch, selector = { stack }, id }`, where `id` is `<provider>-<region>-<arch>-<selector-hash>` per 2.1 and `selector-hash` is the first 8 lowercase hex characters of SHA-256(JCS(selector)) |
 | `public_address` | EIP, reserved IP, or static address; otherwise the VM public address |
 | `firewall` | `{ id, kind }` for the managed firewall |
 | `image_registry` | image registry endpoint |
@@ -69,6 +70,25 @@ Each module exposes the same outputs:
 }
 ```
 
+`target_id` follows `docs/cloud.md` 2.1:
+`<provider>-<region>-<arch>-<selector-hash>`, lowercased with every character
+outside `[a-z0-9-]` replaced by `-`. The selector is `{ stack = target_name }`,
+so for `target_name = "prod"` the hash is the first 8 hex characters of
+SHA-256 of `{"stack":"prod"}`. The same `target_id` is used for desired and
+status repository paths, bootstrap metadata, and resource names.
+
+Boot pins are written as root-owned files in the design's two-line format:
+
+```text
+narwhal-ed25519-v1 <base64(32-byte public key)>
+not_after=2027-11-24T00:00:00Z
+```
+
+Key IDs are the first 8 bytes of SHA-256 of the 32-byte public key, encoded as
+16 lowercase hex characters. The tfvars examples contain generated test public
+keys and IDs derived that way; no private key is committed. The same
+registration shape is used for `status_keys` in `bootstrap.json`.
+
 No output contains a secret value. The DigitalOcean bootstrap token is written
 only to `/etc/narwhal/do-token` in the Droplet `user_data`; it is not in
 `bootstrap`, not in `status_key_secret`, and not in `state_registry_credential_secret`.
@@ -84,9 +104,11 @@ state backend must be protected as a secret store and never committed.
   rules for TCP 443/80, TCP+UDP 53, and UDP 123. No `key_name` is set.
 - DigitalOcean creates a `digitalocean_firewall` with no inbound rule blocks and
   egress rules for TCP 443/80, TCP+UDP 53, and UDP 123. `ssh_keys = []`.
-- GCP creates a custom VPC with no default rules, one egress rule for TCP 443
-  and TCP/UDP 53, and no ingress rule. `block-project-ssh-keys=TRUE`, no
-  SSH keys, no port 22.
+- GCP creates a custom VPC with no default rules, no ingress rule, and an
+  explicit egress allow at priority 1000 for TCP 443/80, TCP/UDP 53, and UDP
+  123 plus a deny-all egress rule at priority 65000. That deny closes the
+  implied allow-all at 65535. `block-project-ssh-keys=TRUE`, no SSH keys, no
+  port 22.
 - AWS requires IMDSv2 (`http_tokens = "required"`). GCP and DigitalOcean rely on
   provider metadata; the container-network metadata block and probe are runtime
   concerns and are not implemented here.
@@ -99,11 +121,22 @@ state backend must be protected as a secret store and never committed.
   is never read by OpenTofu. This is the documented fallback in 4.5: generating
   it in OpenTofu would leave the private key in state. Store it with a pinned
   operator tool before applying.
-- Registries: AWS creates ECR repositories for `narwhald`, every
+- Registries: AWS creates mutable-tag ECR repositories for `narwhald`, every
   `service_images` entry, desired state, and status. GCP creates three Artifact
   Registry repositories (images, desired, status) so status writes cannot touch
-  desired state. DigitalOcean creates DOCR for images and requires an external
-  non-DOCR `state_registry`; DOCR creates repositories on first push.
+  desired state. DigitalOcean creates DOCR for images and requires a
+  `state_registry` that differs from `image_registry` plus a non-empty
+  `state_registry_credential_secret_name`. DOCR creates repositories on first
+  push.
+- DigitalOcean state registry defaults to a non-DOCR registry. A DOCR state
+  registry is accepted only with `allow_docr_state_registry = true`, which
+  asserts that it belongs to a separate DigitalOcean account with its own
+  credential; same-account DOCR remains invalid because DOCR credentials are
+  account-wide.
+- DigitalOcean canonicalizes both registry endpoints before comparing them or
+  testing for DOCR: the host is lowercased and stripped of trailing dots, the
+  repository path is preserved, and schemes, explicit ports, trailing slashes,
+  and empty path segments are rejected.
 
 ## GCP repository path extension
 
@@ -126,7 +159,8 @@ user-data on AWS and DigitalOcean and as the GCP startup script. It:
 - creates the non-login `narwhal` user, subordinate UID/GID ranges, and linger;
 - creates `/etc/narwhal`, `/etc/narwhal/trust`, `/var/lib/narwhal`, `/srv/narwhal`;
 - writes `/etc/narwhal/bootstrap.json` and `/etc/narwhal/trust/<key_id>.pub`
-  atomically and only when the bytes differ;
+  atomically and only when the bytes differ; pin files use the
+  `narwhal-ed25519-v1` + `not_after` two-line format;
 - writes the DigitalOcean token file on DigitalOcean only.
 
 It does not install the agent binary, fetch the status key, or enable the user
@@ -179,10 +213,10 @@ Run on 2026-11-24 with OpenTofu 1.11.8 from `nixpkgs`, from the
 repository root:
 
 ```sh
-nix run nixpkgs#opentofu -- fmt -check -recursive deploy/opentofu
-cd deploy/opentofu/roots/aws && nix run nixpkgs#opentofu -- init -backend=false && nix run nixpkgs#opentofu -- validate
-cd ../digitalocean && nix run nixpkgs#opentofu -- init -backend=false && nix run nixpkgs#opentofu -- validate
-cd ../gcp && nix run nixpkgs#opentofu -- init -backend=false && nix run nixpkgs#opentofu -- validate
+nix shell nixpkgs#opentofu -c tofu fmt -check -recursive deploy/opentofu
+cd deploy/opentofu/roots/aws && nix shell nixpkgs#opentofu -c tofu init -backend=false && nix shell nixpkgs#opentofu -c tofu validate
+cd ../digitalocean && nix shell nixpkgs#opentofu -c tofu init -backend=false && nix shell nixpkgs#opentofu -c tofu validate
+cd ../gcp && nix shell nixpkgs#opentofu -c tofu init -backend=false && nix shell nixpkgs#opentofu -c tofu validate
 ```
 
 Results: formatting clean; all three roots `Success! The configuration is
@@ -190,6 +224,15 @@ valid.` Providers resolved to `hashicorp/aws` 6.74.0,
 `digitalocean/digitalocean` 2.109.0, and `hashicorp/google` 8.12.0. No plan or
 apply was run, so cloud APIs, credentials, AMI resolution, and quota behavior
 were not exercised.
+
+A scratch root also planned `modules/host` with sample inputs. The rendered
+script contained the two-line `narwhal-ed25519-v1 ...` / `not_after=...Z` pin,
+the per-package install loop, and the `{"stack":"prod"}` selector hash
+`37cbdd65` matched the expected 8 hex characters.
+
+A second scratch root evaluated the DigitalOcean canonicalization: uppercase and
+trailing-dot DOCR hosts collapsed to `registry.digitalocean.com`, an explicit
+port failed validation, and repository path case was preserved.
 
 ## Verified versus assumed
 
@@ -215,6 +258,10 @@ Assumed and not verified here, carried from 4.7:
   affected by the VPC egress rule.
 - AWS hop limit 1 alone not blocking userspace networking. This module sets
   IMDSv2 and hop limit 1 but does not add the container-network block or probe.
+- GCP firewall evaluation order for the priority-1000 allow and priority-65000
+  deny-all egress rules is not exercised in a real project here. The rules
+  follow the documented first-match semantics; the deny exists specifically so
+  the implied allow-egress at 65535 is not reached.
 
 Additional assumptions specific to this implementation:
 
@@ -224,9 +271,9 @@ Additional assumptions specific to this implementation:
 - The optional SSM association assumes `amazon-ssm-agent` is present or will be
   installed on the Ubuntu AMI. Attaching `AmazonSSMManagedInstanceCore` does
   not install it.
-- GCP implied allow-egress remains in effect; the single egress allow rule does
-  not by itself restrict every other egress destination without a higher
-  priority deny. The module follows 4.4 literally: egress 443 and DNS only.
+- GCP egress is restricted by an explicit deny-all at priority 65000 beneath
+  the allow rule at 1000. The allow includes TCP 80 and UDP 123 because 4.1
+  requires package mirrors and NTP during bootstrap.
 - AWS and DigitalOcean egress rules are IPv4 (`0.0.0.0/0`); DigitalOcean
   additionally allows `::/0`. Registries are assumed reachable over IPv4.
 - DigitalOcean Secrets Manager resources are not managed because the
@@ -236,9 +283,9 @@ Additional assumptions specific to this implementation:
   Manager, and (when used) Logging APIs. Disable this with
   `enable_required_apis = false` when the project already manages APIs
   elsewhere.
-- GCP service-account IDs are derived from `nw-<project>-<target>`, truncated to
-  30 characters and trimmed. Two targets whose names share the first 30
-  characters collide; use distinct target names.
+- GCP service-account IDs are derived from `nw-<target_id>`, truncated to 30
+  characters and trimmed. Two targets whose identifiers share the first 30
+  characters collide; use distinct targets.
 - The GCP logging sink destination must be an existing resource; the module does
   not create a log bucket or grant the sink writer identity.
 - Each module invocation owns its registry resources (ECR repositories, Artifact
@@ -246,3 +293,8 @@ Additional assumptions specific to this implementation:
   account/project would collide on the shared image repository. Provision the
   registry once per project or use distinct repository names/endpoints per
   target; this module set has no partial "create registries" switch.
+- The manifest project rule permits dots and underscores. Provider repository
+  naming rules may be stricter for pathological combinations (for example
+  consecutive separators); those names are not exercised here.
+- AWS sets `user_data_replace_on_change = false`; bootstrap changes do not
+  replace the instance. The rendered script is bounded by a 16 KB precondition.

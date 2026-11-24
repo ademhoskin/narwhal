@@ -82,7 +82,7 @@ resource "aws_instance" "target" {
   vpc_security_group_ids      = [aws_security_group.target.id]
   iam_instance_profile        = aws_iam_instance_profile.instance.name
   user_data                   = base64encode(module.host.user_data)
-  user_data_replace_on_change = true
+  user_data_replace_on_change = false
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -100,6 +100,13 @@ resource "aws_instance" "target" {
   }
 
   tags = merge(local.common_tags, { Name = local.target_id })
+
+  lifecycle {
+    precondition {
+      condition     = length(module.host.user_data) < 16384
+      error_message = "The rendered user data exceeds the 16 KB EC2 limit."
+    }
+  }
 
   depends_on = [
     aws_route.default,
@@ -133,8 +140,6 @@ resource "aws_ssm_association" "reconcile" {
   }
 
   parameters = {
-    commands = jsonencode([
-      "runuser -u narwhal -- env XDG_RUNTIME_DIR=/run/user/$(id -u narwhal) /var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml",
-    ])
+    commands = "runuser -u narwhal -- env XDG_RUNTIME_DIR=/run/user/$(id -u narwhal) /var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml"
   }
 }

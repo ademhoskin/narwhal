@@ -5,9 +5,13 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-if ! dpkg -s podman >/dev/null 2>&1; then
+missing=""
+for pkg in ${packages}; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+done
+if [ -n "$missing" ]; then
   apt-get update
-  apt-get install -y --no-install-recommends ${packages}
+  apt-get install -y --no-install-recommends $missing
 fi
 
 if ! id -u narwhal >/dev/null 2>&1; then
@@ -46,7 +50,8 @@ ${bootstrap_json}
 NARWHAL_BOOTSTRAP_JSON
 %{ for id, key in trust_keys ~}
 write_if_changed /etc/narwhal/trust/${id}.pub 0644 root:root <<'NARWHAL_TRUST_KEY'
-${key}
+narwhal-ed25519-v1 ${key.public_key}
+not_after=${key.not_after}
 NARWHAL_TRUST_KEY
 %{ endfor ~}
 %{ for file in extra_files ~}
