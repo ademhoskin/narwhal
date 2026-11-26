@@ -23,6 +23,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="Narwhal.Tests" />
     <EmbeddedResource Include="../../deploy/systemd/user/narwhald.service" LogicalName="Narwhal.Units.narwhald.service" />
     <EmbeddedResource Include="../../deploy/systemd/user/narwhald-reconcile.service" LogicalName="Narwhal.Units.narwhald-reconcile.service" />

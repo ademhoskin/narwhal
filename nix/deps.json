@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "pname": "BouncyCastle.Cryptography",
+    "version": "2.7.0",
+    "hash": "sha256-8JH/zKtNA5k+Zgus4ndlmnne4JcvVNfx9L1G1oCWYkE="
+  }
+]

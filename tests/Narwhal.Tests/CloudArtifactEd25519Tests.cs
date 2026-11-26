@@ -116,6 +116,57 @@ public class CloudArtifactEd25519Tests
     }
 
     [Fact]
+    public void PublicKeyFromSeedMatchesFixedVector()
+    {
+        var seed = Convert.FromHexString(Rfc8032Vectors[2].Secret);
+
+        Assert.Equal(Rfc8032Vectors[2].PublicKey, Convert.ToHexStringLower(Ed25519.PublicKeyFromSeed(seed)));
+    }
+
+    [Fact]
+    public void RejectsFlippedSignatureBit()
+    {
+        var vector = Rfc8032Vectors[1];
+        var publicKey = Convert.FromHexString(vector.PublicKey);
+        var message = Convert.FromHexString(vector.Message);
+
+        foreach (var index in new[] { 0, 31, 32, 63 })
+        {
+            var signature = Convert.FromHexString(vector.Signature);
+            signature[index] ^= 0x01;
+            Assert.False(Ed25519.Verify(publicKey, message, signature));
+        }
+    }
+
+    [Fact]
+    public void RejectsTruncatedOrOversizedSignature()
+    {
+        var seed = Convert.FromHexString(Rfc8032Vectors[0].Secret);
+        var publicKey = Ed25519.PublicKeyFromSeed(seed);
+        var signature = Ed25519.Sign(seed, [0x01]);
+        var oversized = new byte[65];
+        signature.CopyTo(oversized, 0);
+
+        Assert.False(Ed25519.Verify(publicKey, [0x01], []));
+        Assert.False(Ed25519.Verify(publicKey, [0x01], signature[..63]));
+        Assert.False(Ed25519.Verify(publicKey, [0x01], oversized));
+    }
+
+    [Fact]
+    public void RejectsWrongLengthPublicKey()
+    {
+        var seed = Convert.FromHexString(Rfc8032Vectors[0].Secret);
+        var publicKey = Ed25519.PublicKeyFromSeed(seed);
+        var signature = Ed25519.Sign(seed, [0x01]);
+        var oversized = new byte[33];
+        publicKey.CopyTo(oversized, 0);
+
+        Assert.False(Ed25519.Verify([], [0x01], signature));
+        Assert.False(Ed25519.Verify(publicKey[..31], [0x01], signature));
+        Assert.False(Ed25519.Verify(oversized, [0x01], signature));
+    }
+
+    [Fact]
     public void RoundTripsRandomMessages()
     {
         var random = new Random(12345);
