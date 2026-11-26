@@ -138,7 +138,7 @@ public class StatusCommandIntegrationTests
             var exitCode = await App.Main(["status", "--config", configPath, "--target", TargetId()]);
 
             Assert.Equal(3, exitCode);
-            Assert.Contains("invalid shape", errors.ToString(), StringComparison.Ordinal);
+            Assert.Contains("cannot read status", errors.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -311,7 +311,7 @@ public class StatusCommandIntegrationTests
             if (path == manifestPath)
             {
                 context.Response.Headers["Docker-Content-Digest"] = CloudEncoding.Sha256Digest(Manifest);
-                Write(context, Manifest);
+                Write(context, Manifest, StatusManifest.ManifestMediaType);
                 return;
             }
 
@@ -321,13 +321,13 @@ public class StatusCommandIntegrationTests
                 var digest = path[prefix.Length..];
                 if (digest == CloudEncoding.Sha256Digest(Payload))
                 {
-                    Write(context, Payload);
+                    Write(context, Payload, "application/octet-stream");
                     return;
                 }
 
                 if (digest == CloudEncoding.Sha256Digest(Signature))
                 {
-                    Write(context, Signature);
+                    Write(context, Signature, "application/octet-stream");
                     return;
                 }
             }
@@ -336,9 +336,10 @@ public class StatusCommandIntegrationTests
             context.Response.Close();
         }
 
-        private static void Write(HttpListenerContext context, byte[] bytes)
+        private static void Write(HttpListenerContext context, byte[] bytes, string contentType)
         {
             context.Response.StatusCode = 200;
+            context.Response.ContentType = contentType;
             context.Response.ContentLength64 = bytes.Length;
             context.Response.OutputStream.Write(bytes);
             context.Response.Close();

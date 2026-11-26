@@ -24,6 +24,8 @@ narwhal.toml + flake.nix  ->  nix build  ->  podman load  ->  podman run
 
 - Nix with flakes enabled (`experimental-features = nix-command flakes`)
 - podman 5+
+- `oras` for registry operations (the packaged `narwhal` wrapper supplies it;
+  install `nixpkgs#oras` when running from a source build)
 
 ## Install
 

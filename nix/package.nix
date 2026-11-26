@@ -4,6 +4,8 @@
 , clang
 , zlib
 , stdenv
+, oras
+, makeWrapper
 }:
 
 let
@@ -44,7 +46,7 @@ buildDotnetModule {
   inherit runtimeId;
   dotnetFlags = [ "-p:PublishAot=true" ];
 
-  nativeBuildInputs = [ clang ];
+  nativeBuildInputs = [ clang makeWrapper ];
   buildInputs = [ zlib ];
 
   dontStrip = false;
@@ -65,7 +67,15 @@ buildDotnetModule {
       -p:PublishAot=true \
       -o "$out/lib/narwhal"
 
-    ln -s ../lib/narwhal/narwhal "$out/bin/narwhal"
+    # narwhald and narwhal-guard are the same binary; the code picks its mode
+    # from the basename of /proc/self/exe, so the raw copies keep those names.
+    for name in narwhal narwhald narwhal-guard; do
+      if [ "$name" != narwhal ]; then
+        ln -f "$out/lib/narwhal/narwhal" "$out/lib/narwhal/$name"
+      fi
+      makeWrapper "$out/lib/narwhal/$name" "$out/bin/$name" \
+        --prefix PATH : ${lib.makeBinPath [ oras ]}
+    done
 
     runHook postInstall
   '';

@@ -87,7 +87,7 @@ public static class ReconcileCommand
         bool verbose,
         CancellationToken cancellationToken)
     {
-        using var registry = OciRegistryClient.Create(config, reporter);
+        using var registry = OciRegistryClient.Create(config, reporter, verbose);
         var runner = new ProcessRunner(reporter, verbose);
         var runtime = new PodmanRuntime(
             runner,

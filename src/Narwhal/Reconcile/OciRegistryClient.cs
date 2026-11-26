@@ -1,6 +1,6 @@
 using System.Diagnostics;
-using System.Net;
-using System.Net.Http.Headers;
+using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Narwhal.Cli;
@@ -37,96 +37,157 @@ public sealed class RegistryManifestRejectedException(int statusCode, string mes
     public int StatusCode { get; } = statusCode;
 }
 
-/// <summary>Minimal OCI Distribution client with basic and bearer-token authentication.</summary>
+/// <summary>OCI Distribution client backed by the <c>oras</c> CLI, invoked without a shell.</summary>
 public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDisposable
 {
-    private const string ManifestMediaType = "application/vnd.oci.image.manifest.v1+json";
-    private const string DockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json";
-    private const int MaxRedirects = 5;
     public const long MaximumBlobBytes = 256L * 1024 * 1024;
+    public const long MaximumManifestBytes = 64L * 1024 * 1024;
 
-    private readonly HttpClient _http;
-    private readonly string _baseAddress;
-    private readonly Uri _baseUri;
+    private const string ExecutableVariable = "NARWHAL_ORAS";
+    private const int MaximumCapturedChars = 8 * 1024;
+    private const int MaximumCommandOutputChars = 256 * 1024;
+    // Every operation runs one or more oras processes, and a status publish runs
+    // several, so the per-command timeout is deliberately short; the aggregate
+    // sequence is bounded by the number of blobs plus the manifest.
+    private static readonly TimeSpan DefaultCommandTimeout = TimeSpan.FromSeconds(60);
+    private const UnixFileMode PrivateDirectoryMode =
+        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+    private const UnixFileMode PrivateFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+    private const uint AnyExecuteBit = 0b001_001_001;
+    private const uint DirectoryType = 0x4000;
+
+    /// <summary>Credentials the agent reads for itself; the child never needs them.</summary>
+    private static readonly string[] StrippedEnvironment =
+    [
+        "NARWHAL_REGISTRY_USERNAME",
+        "NARWHAL_REGISTRY_PASSWORD",
+        "NARWHAL_REGISTRY_TOKEN",
+        "NARWHAL_REGISTRY_CREDENTIAL_HELPER",
+        "NARWHAL_REGISTRY_INSECURE",
+        "NARWHAL_IMAGE_REGISTRY_USERNAME",
+        "NARWHAL_IMAGE_REGISTRY_PASSWORD",
+        "NARWHAL_IMAGE_REGISTRY_TOKEN",
+        "NARWHAL_IMAGE_REGISTRY_CREDENTIAL_HELPER",
+        "NARWHAL_IMAGE_REGISTRY_INSECURE",
+        "DOCKER_AUTH_CONFIG",
+    ];
+
+    private readonly string _registry;
     private readonly RegistryAuthConfig _auth;
-    private readonly Reporter? _reporter;
-    private readonly Dictionary<string, CachedToken> _tokens = new(StringComparer.Ordinal);
-    private RegistryCredential? _credential;
+    private readonly ProcessRunner _runner;
+    private readonly TimeSpan _commandTimeout;
+    private readonly Lazy<string> _workDirectory;
+    private readonly Lazy<string> _authFile;
+    private readonly string[] _secrets;
+    private string? _credentialHelperSuffix;
 
-    public OciRegistryClient(
+    public OciRegistryClient(string registry, RegistryAuthConfig auth, Reporter? reporter = null, bool verbose = false)
+        : this(registry, auth, reporter, verbose, commandTimeout: null)
+    {
+    }
+
+    internal OciRegistryClient(
         string registry,
         RegistryAuthConfig auth,
-        Reporter? reporter = null,
-        HttpMessageHandler? handler = null)
+        Reporter? reporter,
+        bool verbose,
+        TimeSpan? commandTimeout)
     {
-        var scheme = auth.Insecure ? "http" : "https";
-        _baseAddress = $"{scheme}://{registry}";
-        _baseUri = new Uri(_baseAddress);
+        if (string.IsNullOrWhiteSpace(registry))
+            throw new ArgumentException("registry must not be empty", nameof(registry));
+
+        _registry = registry.TrimEnd('/');
         _auth = auth;
-        _reporter = reporter;
-        _http = handler is null
-            ? new HttpClient(CreateDefaultHandler())
-            : new HttpClient(handler, disposeHandler: false);
-        _http.Timeout = TimeSpan.FromSeconds(60);
+        _runner = new ProcessRunner(reporter ?? SilentReporter(), verbose);
+        _commandTimeout = commandTimeout ?? DefaultCommandTimeout;
+        _workDirectory = new Lazy<string>(CreateWorkDirectory);
+        _authFile = new Lazy<string>(CreateAuthFile);
+        _secrets = new[] { auth.Password, auth.Token }
+            .Where(secret => !string.IsNullOrEmpty(secret))
+            .Select(secret => secret!)
+            .ToArray();
     }
 
-    internal static HttpClientHandler CreateDefaultHandler() =>
-        new() { AllowAutoRedirect = false };
+    public static OciRegistryClient Create(AgentConfig config, Reporter reporter, bool verbose = false) =>
+        new(config.StateRegistry ?? config.ImageRegistry, config.Auth, reporter, verbose);
 
-    public static OciRegistryClient Create(AgentConfig config, Reporter reporter, HttpMessageHandler? handler = null) =>
-        new(config.StateRegistry ?? config.ImageRegistry, config.Auth, reporter, handler);
-
-    public async Task<RegistryManifest> GetManifestAsync(string repository, string reference, CancellationToken cancellationToken)
-    {
-        var (digest, bytes) = await FetchManifestBytesAsync(repository, reference, cancellationToken);
-        var layers = OciManifestParser.Parse(bytes, repository, reference);
-        return new RegistryManifest(digest, bytes, layers, DesiredArtifactLayout.Select(layers));
-    }
-
-    /// <summary>Fetches the status artifact manifest, selecting the status payload and signature layers.</summary>
-    public async Task<RegistryManifest> GetStatusManifestAsync(string repository, string reference, CancellationToken cancellationToken)
-    {
-        var (digest, bytes) = await FetchManifestBytesAsync(repository, reference, cancellationToken);
-        var layers = OciManifestParser.Parse(bytes, repository, reference);
-        return new RegistryManifest(digest, bytes, layers, StatusArtifactLayout.Select(layers));
-    }
-
-    private async Task<(string Digest, byte[] Bytes)> FetchManifestBytesAsync(
+    public Task<RegistryManifest> GetManifestAsync(
         string repository,
         string reference,
+        CancellationToken cancellationToken) =>
+        FetchManifestAsync(repository, reference, DesiredArtifactLayout.Select, cancellationToken);
+
+    /// <summary>Fetches the status artifact manifest, selecting the status payload and signature layers.</summary>
+    public Task<RegistryManifest> GetStatusManifestAsync(
+        string repository,
+        string reference,
+        CancellationToken cancellationToken) =>
+        FetchManifestAsync(repository, reference, StatusArtifactLayout.Select, cancellationToken);
+
+    private async Task<RegistryManifest> FetchManifestAsync(
+        string repository,
+        string reference,
+        Func<IReadOnlyList<ArtifactLayer>, SelectedArtifactLayers> select,
         CancellationToken cancellationToken)
     {
-        var path = $"/v2/{repository}/manifests/{reference}";
-        using var response = await SendWithAuthAsync(HttpMethod.Get, path, repository, "pull", acceptManifest: true, cancellationToken);
-        var bytes = await ReadBodyAsync(response, path, cancellationToken);
-        var digest = CloudEncoding.Sha256Digest(bytes);
+        var path = TempPath("manifest-", ".json");
+        var target = Reference(repository, reference);
+        byte[] bytes;
+        string? reportedDigest;
+        try
+        {
+            var result = await RunAsync(
+                ["manifest", "fetch", "--output", path, "--descriptor"],
+                target,
+                stream: false,
+                cancellationToken);
 
-        var header = response.Headers.TryGetValues("Docker-Content-Digest", out var values)
-            ? values.FirstOrDefault()
-            : null;
-        if (header is not null && !string.Equals(header, digest, StringComparison.Ordinal))
-            throw new RegistryException($"manifest digest header does not match the manifest bytes for {repository}:{reference}");
+            if (!result.Ok)
+                ThrowFor(result, "fetch manifest", target, manifestPush: false);
+
+            bytes = await ReadFileAsync(path, MaximumManifestBytes, "the fetched manifest", cancellationToken);
+            reportedDigest = DescriptorDigest(result);
+        }
+        finally
+        {
+            DeleteQuietly(path);
+        }
+
+        var digest = CloudEncoding.Sha256Digest(bytes);
+        if (reportedDigest is not null && !string.Equals(reportedDigest, digest, StringComparison.Ordinal))
+            throw new RegistryException(
+                $"manifest digest reported by the registry does not match the manifest bytes for {repository}:{reference}");
 
         if (CloudPatterns.Digest().IsMatch(reference) && !string.Equals(reference, digest, StringComparison.Ordinal))
             throw new RegistryException($"manifest bytes do not match the pinned digest for {repository}:{reference}");
 
-        return (digest, bytes);
+        var layers = OciManifestParser.Parse(bytes, repository, reference);
+        return new RegistryManifest(digest, bytes, layers, select(layers));
     }
 
     public async Task<byte[]> GetBlobAsync(string repository, string digest, CancellationToken cancellationToken)
     {
-        using var response = await SendWithAuthAsync(
-            HttpMethod.Get,
-            $"/v2/{repository}/blobs/{digest}",
-            repository,
-            "pull",
-            acceptManifest: false,
-            cancellationToken);
-        var bytes = await ReadBodyCappedAsync(
-            response,
-            $"/v2/{repository}/blobs/{digest}",
-            MaximumBlobBytes,
-            cancellationToken);
+        var path = TempPath("blob-", ".bin");
+        byte[] bytes;
+        try
+        {
+            var target = Reference(repository, digest);
+            var result = await RunAsync(
+                ["blob", "fetch", "--no-tty", "--output", path],
+                target,
+                stream: false,
+                cancellationToken);
+
+            if (!result.Ok)
+                ThrowFor(result, "fetch blob", target, manifestPush: false);
+
+            bytes = await ReadFileAsync(path, MaximumBlobBytes, $"blob {digest}", cancellationToken);
+        }
+        finally
+        {
+            DeleteQuietly(path);
+        }
+
         var actual = CloudEncoding.Sha256Digest(bytes);
         if (!string.Equals(actual, digest, StringComparison.Ordinal))
             throw new CloudArtifactException(
@@ -137,59 +198,48 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
 
     public async Task<bool> BlobExistsAsync(string repository, string digest, CancellationToken cancellationToken)
     {
-        using var response = await SendWithAuthAsync(
-            HttpMethod.Head,
-            $"/v2/{repository}/blobs/{digest}",
-            repository,
-            "pull",
-            acceptManifest: false,
-            cancellationToken,
-            isExpectedFailure: static response => response.StatusCode is
-                HttpStatusCode.NotFound or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden);
-        return response.IsSuccessStatusCode;
+        var target = Reference(repository, digest);
+        var result = await RunAsync(
+            ["blob", "fetch", "--descriptor", "--no-tty"],
+            target,
+            stream: false,
+            cancellationToken);
+
+        if (result.Ok)
+            return true;
+
+        var message = result.StdErr.Length > 0 ? result.StdErr : result.StdOut;
+        if (LooksLikeAuthFailure(message) || LooksLikeNotFound(message))
+            return false;
+
+        ThrowFor(result, "probe blob", target, manifestPush: false);
+        return false;
     }
 
-    /// <summary>Uploads a blob when it is absent, using the OCI two-step upload flow.</summary>
+    /// <summary>Uploads a blob. oras skips the upload when the registry already has it.</summary>
     public async Task PushBlobAsync(string repository, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
         var digest = CloudEncoding.Sha256Digest(bytes.Span);
-        if (await BlobExistsAsync(repository, digest, cancellationToken))
-            return;
+        var path = WriteTempFile("blob-", ".bin", bytes.Span);
+        try
+        {
+            var target = Reference(repository, digest);
+            var result = await RunAsync(
+                ["blob", "push", "--no-tty"],
+                target,
+                stream: true,
+                cancellationToken,
+                trailing: path);
 
-        using var start = await SendWithAuthAsync(
-            HttpMethod.Post,
-            $"/v2/{repository}/blobs/uploads/",
-            repository,
-            "pull,push",
-            acceptManifest: false,
-            cancellationToken);
-        if (start.StatusCode != HttpStatusCode.Accepted)
-            throw new RegistryException(
-                $"registry did not start an upload session for {repository} (status {(int)start.StatusCode})");
+            if (!result.Ok)
+                ThrowFor(result, "push blob", target, manifestPush: false);
 
-        var location = start.Headers.Location?.ToString();
-        if (string.IsNullOrEmpty(location))
-            throw new RegistryException($"registry did not return an upload location for {repository}");
-
-        var uploadPath = ResolveUploadLocation(location);
-        uploadPath += (uploadPath.Contains('?') ? "&" : "?") +
-                      "digest=" + Uri.EscapeDataString(digest);
-
-        using var completed = await SendWithAuthAsync(
-            HttpMethod.Put,
-            uploadPath,
-            repository,
-            "pull,push",
-            acceptManifest: false,
-            cancellationToken,
-            body: bytes.ToArray(),
-            contentType: "application/octet-stream");
-
-        var header = completed.Headers.TryGetValues("Docker-Content-Digest", out var values)
-            ? values.FirstOrDefault()
-            : null;
-        if (header is not null && !string.Equals(header, digest, StringComparison.Ordinal))
-            throw new RegistryException($"uploaded blob digest header does not match {digest}");
+            await VerifyPushedBlobAsync(target, digest, cancellationToken);
+        }
+        finally
+        {
+            DeleteQuietly(path);
+        }
     }
 
     /// <summary>Pushes a manifest by tag or digest. Rejection returns <see cref="RegistryManifestRejectedException"/>.</summary>
@@ -200,415 +250,497 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
         string mediaType,
         CancellationToken cancellationToken)
     {
-        using var response = await SendWithAuthAsync(
-            HttpMethod.Put,
-            $"/v2/{repository}/manifests/{reference}",
-            repository,
-            "pull,push",
-            acceptManifest: false,
-            cancellationToken,
-            body: manifest,
-            contentType: mediaType,
-            isExpectedFailure: static response => (int)response.StatusCode is 400 or 415 or 422);
-
-        if (!response.IsSuccessStatusCode)
+        var path = WriteTempFile("manifest-push-", ".json", manifest);
+        try
         {
-            throw new RegistryManifestRejectedException(
-                (int)response.StatusCode,
-                $"registry rejected the manifest for {repository}:{reference} with status {(int)response.StatusCode}");
+            var target = Reference(repository, reference);
+            var result = await RunAsync(
+                ["manifest", "push", "--media-type", mediaType],
+                target,
+                stream: true,
+                cancellationToken,
+                trailing: path);
+
+            if (!result.Ok)
+                ThrowFor(result, "push manifest", target, manifestPush: true);
+        }
+        finally
+        {
+            DeleteQuietly(path);
         }
 
-        var digest = CloudEncoding.Sha256Digest(manifest);
-        var header = response.Headers.TryGetValues("Docker-Content-Digest", out var values)
-            ? values.FirstOrDefault()
-            : null;
-        if (header is not null && !string.Equals(header, digest, StringComparison.Ordinal))
-            throw new RegistryException($"manifest digest header does not match the manifest bytes for {repository}:{reference}");
-
-        return new RegistryPushResult(digest, reference);
+        return new RegistryPushResult(CloudEncoding.Sha256Digest(manifest), reference);
     }
 
-    private string ResolveUploadLocation(string location)
-    {
-        if (location.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-            location.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-        {
-            var absolute = new Uri(location, UriKind.Absolute);
-            var baseUri = new Uri(_baseAddress);
-            if (!string.Equals(absolute.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(absolute.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase) ||
-                absolute.Port != baseUri.Port)
-            {
-                throw new RegistryException("registry upload location must stay on the registry origin");
-            }
+    private string Reference(string repository, string reference) =>
+        CloudPatterns.Digest().IsMatch(reference)
+            ? $"{_registry}/{repository}@{reference}"
+            : $"{_registry}/{repository}:{reference}";
 
-            return absolute.PathAndQuery;
-        }
-
-        if (location.StartsWith("//", StringComparison.Ordinal))
-            throw new RegistryException("registry upload location must stay on the registry origin");
-
-        return location.StartsWith('/') ? location : "/" + location;
-    }
-
-    private async Task<HttpResponseMessage> SendWithAuthAsync(
-        HttpMethod method,
-        string path,
-        string repository,
-        string actions,
-        bool acceptManifest,
+    private async Task<ProcessResult> RunAsync(
+        IReadOnlyList<string> head,
+        string target,
+        bool stream,
         CancellationToken cancellationToken,
-        byte[]? body = null,
-        string? contentType = null,
-        Func<HttpResponseMessage, bool>? isExpectedFailure = null)
+        string? trailing = null)
     {
-        var scope = $"repository:{repository}:{actions}";
-        var token = CurrentToken(scope);
-        RegistryCredential? basic = null;
-        if (token is null)
+        var args = BuildArguments(head, target, trailing);
+        try
+        {
+            return await _runner.RunAsync(
+                Executable,
+                args,
+                new ProcessOptions
+                {
+                    Input = Stdin,
+                    Stream = stream,
+                    Timeout = _commandTimeout,
+                    Environment = ChildEnvironment,
+                    RemoveEnvironment = StrippedEnvironment,
+                    MaxOutputChars = MaximumCommandOutputChars,
+                },
+                cancellationToken);
+        }
+        catch (ToolNotFoundException e)
+        {
+            throw new RegistryException(e.Message);
+        }
+        catch (ProcessTimeoutException)
+        {
+            throw new RegistryException($"oras {head[0]} {head[1]} {target} timed out after {_commandTimeout.TotalSeconds:0}s");
+        }
+    }
+
+    private List<string> BuildArguments(IReadOnlyList<string> head, string target, string? trailing)
+    {
+        var args = new List<string>(head.Count + 10);
+        args.AddRange(head);
+        if (_auth.Insecure)
+            args.Add("--plain-http");
+
+        // Never let oras fall back to the user's Docker config, even with no auth.
+        args.Add("--registry-config");
+        args.Add(AuthFile);
+
+        if (string.IsNullOrEmpty(_auth.Token) &&
+            !string.IsNullOrEmpty(_auth.Username) &&
+            _auth.Password is not null)
+        {
+            args.Add("-u");
+            args.Add(_auth.Username);
+            args.Add("--password-stdin");
+        }
+
+        args.Add(target);
+        if (trailing is not null)
+            args.Add(trailing);
+        return args;
+    }
+
+    private string? Stdin
+    {
+        get
         {
             if (!string.IsNullOrEmpty(_auth.Token))
-                token = _auth.Token;
-            else
-                basic = await ResolveCredentialAsync(cancellationToken);
+                return null;
+            if (!string.IsNullOrEmpty(_auth.Username) && _auth.Password is not null)
+                return _auth.Password;
+            return null;
         }
+    }
 
-        for (var attempt = 0; attempt < 2; attempt++)
+    private string AuthFile => _authFile.Value;
+
+    internal static string Executable =>
+        Environment.GetEnvironmentVariable(ExecutableVariable) ?? "oras";
+
+    private void ThrowFor(ProcessResult result, string action, string target, bool manifestPush)
+    {
+        var text = Redact(Bound(result.StdErr.Length > 0 ? result.StdErr : result.StdOut));
+        var status = ParseStatusCode(text);
+
+        if (status is 401 or 403 || LooksLikeAuthFailure(text))
+            throw new RegistryException(
+                $"oras {action} {target} failed: {text}",
+                auth: true,
+                statusCode: status ?? 401);
+
+        if (manifestPush && (status is 400 or 415 or 422 || LooksLikeManifestRejection(text)))
+            throw new RegistryManifestRejectedException(
+                status ?? 400,
+                $"registry rejected the manifest for {target}: {text}");
+
+        if (status == 404 || LooksLikeNotFound(text))
+            throw new RegistryException(
+                $"oras {action} {target} failed: {text}",
+                statusCode: status ?? 404);
+
+        throw new RegistryException(
+            $"oras {action} {target} failed with exit {result.ExitCode}: {text}",
+            statusCode: status);
+    }
+
+    private static bool LooksLikeAuthFailure(string text) =>
+        Contains(text, "unauthorized") ||
+        Contains(text, "authentication required") ||
+        Contains(text, "denied");
+
+    private static bool LooksLikeNotFound(string text) =>
+        Contains(text, "not found") ||
+        Contains(text, "name unknown") ||
+        Contains(text, "manifest unknown") ||
+        Contains(text, "blob unknown");
+
+    private static bool LooksLikeManifestRejection(string text) =>
+        Contains(text, "manifest invalid") ||
+        Contains(text, "manifest unverified") ||
+        Contains(text, "manifest blob unknown") ||
+        Contains(text, "unsupported") ||
+        Contains(text, "size invalid") ||
+        Contains(text, "digest invalid");
+
+    private static bool Contains(string text, string value) =>
+        text.Contains(value, StringComparison.OrdinalIgnoreCase);
+
+    private static int? ParseStatusCode(string text)
+    {
+        const string marker = "status code ";
+        var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        while (index >= 0)
         {
-            var (response, onBaseOrigin) = await SendFollowingRedirectsAsync(
-                method,
-                new Uri(_baseAddress + path),
-                path,
-                acceptManifest,
-                token,
-                basic,
-                body,
-                contentType,
-                cancellationToken);
-
-            if (!onBaseOrigin)
-            {
-                if (isExpectedFailure is not null && isExpectedFailure(response))
-                    return response;
-                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                {
-                    var statusCode = (int)response.StatusCode;
-                    response.Dispose();
-                    throw new RegistryException(
-                        "redirected registry request was rejected",
-                        auth: true,
-                        statusCode: statusCode);
-                }
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    using (response)
-                    {
-                        throw new RegistryException(
-                            $"registry returned {(int)response.StatusCode} for {path}",
-                            statusCode: (int)response.StatusCode);
-                    }
-                }
-
-                return response;
-            }
-
-            if (response.StatusCode is not (HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden))
-            {
-                if (isExpectedFailure is not null && isExpectedFailure(response))
-                    return response;
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    using (response)
-                    {
-                        throw new RegistryException(
-                            $"registry returned {(int)response.StatusCode} for {path}",
-                            auth: response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden,
-                            statusCode: (int)response.StatusCode);
-                    }
-                }
-
-                return response;
-            }
-
-            var challenge = BearerChallenge.TryParse(response.Headers.WwwAuthenticate);
-            response.Dispose();
-            if (attempt == 1 || challenge is null)
-            {
-                throw new RegistryException(
-                    $"registry rejected credentials for {repository}",
-                    auth: true);
-            }
-
-            token = await FetchTokenAsync(challenge, scope, cancellationToken);
+            var start = index + marker.Length;
+            if (start + 3 <= text.Length &&
+                int.TryParse(text.AsSpan(start, 3), out var status) &&
+                status is >= 400 and <= 599)
+                return status;
+            index = text.IndexOf(marker, start, StringComparison.OrdinalIgnoreCase);
         }
 
-        throw new RegistryException($"registry rejected credentials for {repository}", auth: true);
-    }
-
-    private async Task<(HttpResponseMessage Response, bool OnBaseOrigin)> SendFollowingRedirectsAsync(
-        HttpMethod method,
-        Uri initial,
-        string path,
-        bool acceptManifest,
-        string? token,
-        RegistryCredential? basic,
-        byte[]? body,
-        string? contentType,
-        CancellationToken cancellationToken)
-    {
-        var uri = initial;
-        for (var redirects = 0; ; redirects++)
-        {
-            using var request = new HttpRequestMessage(method, uri);
-            if (acceptManifest)
-            {
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(ManifestMediaType));
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(DockerManifestMediaType));
-            }
-
-            if (body is not null)
-            {
-                request.Content = new ByteArrayContent(body);
-                if (contentType is not null)
-                    request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-            }
-
-            if (IsBaseOrigin(uri))
-            {
-                if (token is not null)
-                {
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                }
-                else if (basic is not null)
-                {
-                    var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{basic.Username}:{basic.Secret}"));
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encoded);
-                }
-            }
-
-            HttpResponseMessage response;
-            try
-            {
-                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            }
-            catch (Exception e) when ((e is HttpRequestException or TaskCanceledException) && !cancellationToken.IsCancellationRequested)
-            {
-                throw new RegistryException($"registry request failed: {e.Message}");
-            }
-
-            if (!IsRedirect(response.StatusCode))
-                return (response, IsBaseOrigin(uri));
-
-            if (method != HttpMethod.Get && method != HttpMethod.Head)
-            {
-                response.Dispose();
-                throw new RegistryException($"registry redirect rejected for {path}");
-            }
-
-            var location = response.Headers.Location;
-            response.Dispose();
-            if (location is null)
-                throw new RegistryException($"registry redirect has no location for {uri}");
-            if (redirects == MaxRedirects)
-                throw new RegistryException($"registry redirect limit exceeded for {path}");
-
-            var next = location.IsAbsoluteUri ? location : new Uri(uri, location);
-            ValidateRedirect(uri, next);
-            uri = next;
-        }
-    }
-
-    private bool IsBaseOrigin(Uri uri) =>
-        string.Equals(uri.Scheme, _baseUri.Scheme, StringComparison.OrdinalIgnoreCase) &&
-        string.Equals(uri.Host, _baseUri.Host, StringComparison.OrdinalIgnoreCase) &&
-        uri.Port == _baseUri.Port;
-
-    private static void ValidateRedirect(Uri from, Uri to)
-    {
-        if (to.Scheme != Uri.UriSchemeHttp && to.Scheme != Uri.UriSchemeHttps)
-            throw new RegistryException($"registry redirect uses an unsupported scheme: {to.Scheme}");
-        if (from.Scheme == Uri.UriSchemeHttps && to.Scheme == Uri.UriSchemeHttp)
-            throw new RegistryException("registry redirect must not downgrade HTTPS");
-        if (to.UserInfo.Length > 0 || to.Fragment.Length > 0)
-            throw new RegistryException("registry redirect must not carry userinfo or a fragment");
-    }
-
-    private string? CurrentToken(string scope)
-    {
-        if (_tokens.TryGetValue(scope, out var cached) && DateTimeOffset.UtcNow < cached.RefreshAt)
-            return cached.Token;
         return null;
     }
 
-    private async Task<string> FetchTokenAsync(BearerChallenge challenge, string scope, CancellationToken cancellationToken)
+    private string Bound(string text) =>
+        text.Length <= MaximumCapturedChars
+            ? text
+            : text[..MaximumCapturedChars] + "\n...(output truncated)";
+
+    private string Redact(string text)
     {
-        Uri realm;
-        try
-        {
-            realm = new Uri(challenge.Realm, UriKind.Absolute);
-        }
-        catch (UriFormatException)
-        {
-            throw new RegistryException("registry bearer realm is not an absolute URI", auth: true);
-        }
+        foreach (var secret in _secrets)
+            text = text.Replace(secret, "***", StringComparison.Ordinal);
+        return text;
+    }
 
-        ValidateRealm(realm);
-        RegistryCredential? credential;
-        try
+    private string CreateWorkDirectory()
+    {
+        var name = "oras-" + Guid.NewGuid().ToString("N");
+        foreach (var (parent, leaf) in WorkDirectoryCandidates(name))
         {
-            credential = await ResolveCredentialAsync(cancellationToken);
-        }
-        catch (RegistryException)
-        {
-            throw;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or HttpRequestException or
-                                  JsonException or FormatException or InvalidOperationException)
-        {
-            throw new RegistryException($"registry credential resolution failed: {e.Message}", auth: true);
-        }
-
-        var service = challenge.Service ?? "";
-        var requestedScope = challenge.Scope ?? scope;
-        var url = challenge.Realm +
-                  (challenge.Realm.Contains('?', StringComparison.Ordinal) ? "&" : "?") +
-                  "service=" + Uri.EscapeDataString(service) +
-                  "&scope=" + Uri.EscapeDataString(requestedScope);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (credential is not null)
-        {
-            var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{credential.Username}:{credential.Secret}"));
-            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", basic);
-        }
-
-        HttpResponseMessage response;
-        try
-        {
-            response = await _http.SendAsync(request, cancellationToken);
-        }
-        catch (Exception e) when ((e is HttpRequestException or TaskCanceledException or IOException) &&
-                                  !cancellationToken.IsCancellationRequested)
-        {
-            throw new RegistryException($"registry token request failed: {e.Message}", auth: true);
-        }
-
-        using (response)
-        {
-            if (IsRedirect(response.StatusCode))
-                throw new RegistryException("registry token redirect rejected", auth: true);
-            if (!response.IsSuccessStatusCode)
-                throw new RegistryException("registry token request failed", auth: true);
-
-            byte[] bytes;
             try
             {
-                bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-            }
-            catch (Exception e) when ((e is HttpRequestException or TaskCanceledException or IOException) &&
-                                      !cancellationToken.IsCancellationRequested)
-            {
-                throw new RegistryException($"cannot read the registry token response: {e.Message}", auth: true);
-            }
-
-            JsonDocument document;
-            try
-            {
-                document = JsonDocument.Parse(bytes);
-            }
-            catch (JsonException)
-            {
-                throw new RegistryException("registry token response is not JSON", auth: true);
-            }
-
-            using (document)
-            {
-                var root = document.RootElement;
-                string? token;
-                int lifetime;
-                try
+                if (leaf == name)
                 {
-                    token = root.TryGetProperty("token", out var direct)
-                        ? direct.GetString()
-                        : root.TryGetProperty("access_token", out var access) ? access.GetString() : null;
-                    lifetime = root.TryGetProperty("expires_in", out var expires) && expires.TryGetInt32(out var seconds)
-                        ? Math.Max(1, seconds)
-                        : 60;
-                }
-                catch (InvalidOperationException)
-                {
-                    throw new RegistryException("registry token response has an invalid shape", auth: true);
+                    CreatePrivateDirectory(parent);
+                    if (!IsPrivateDirectory(parent))
+                        continue;
                 }
 
-                if (string.IsNullOrEmpty(token))
-                    throw new RegistryException("registry token response did not contain a token", auth: true);
+                var candidate = Path.Combine(parent, leaf);
+                CreatePrivateDirectory(candidate);
+                if (!IsPrivateDirectory(candidate))
+                    continue;
 
-                _reporter?.Detail($"registry token acquired for {requestedScope}");
-                _tokens[scope] = new CachedToken(token, DateTimeOffset.UtcNow.AddSeconds(lifetime * 0.8));
-                return token;
+                CreatePrivateDirectory(Path.Combine(candidate, "docker"));
+                return candidate;
             }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                // Try the next runtime directory.
+            }
+        }
+
+        throw new RegistryException("cannot create a private directory for oras");
+    }
+
+    private static IEnumerable<(string Parent, string Leaf)> WorkDirectoryCandidates(string name)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            var runtime = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+            if (!string.IsNullOrWhiteSpace(runtime))
+                yield return (Path.Combine(runtime, "narwhal"), name);
+
+            yield return (Path.Combine("/run/user/" + GetEuid().ToString(CultureInfo.InvariantCulture), "narwhal"), name);
+        }
+
+        // Unique leaf under the shared temp directory: never chmod the parent.
+        yield return (Path.GetTempPath(), "narwhal-" + name);
+    }
+
+    private static bool IsPrivateDirectory(string path)
+    {
+        if (!OperatingSystem.IsLinux())
+            return true;
+
+        try
+        {
+            var metadata = PosixFile.StatPath(path);
+            return (metadata.Mode & PosixFile.TypeMask) == DirectoryType &&
+                   !metadata.IsGroupOrOtherWritable &&
+                   metadata.Uid == GetEuid();
+        }
+        catch (IOException)
+        {
+            return false;
         }
     }
 
-    private static async Task<byte[]> ReadBodyAsync(
-        HttpResponseMessage response,
-        string path,
-        CancellationToken cancellationToken)
+    private static void CreatePrivateDirectory(string path)
     {
-        try
+        if (OperatingSystem.IsWindows())
         {
-            return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            Directory.CreateDirectory(path);
+            return;
         }
-        catch (Exception e) when ((e is HttpRequestException or TaskCanceledException or IOException) &&
-                                  !cancellationToken.IsCancellationRequested)
-        {
-            throw new RegistryException($"cannot read the registry response for {path}: {e.Message}");
-        }
+
+        Directory.CreateDirectory(path, PrivateDirectoryMode);
+        File.SetUnixFileMode(path, PrivateDirectoryMode);
     }
 
-    private static async Task<byte[]> ReadBodyCappedAsync(
-        HttpResponseMessage response,
-        string path,
-        long maximumBytes,
-        CancellationToken cancellationToken)
+    private string CreateAuthFile()
     {
-        if (response.Content.Headers.ContentLength is { } length && length > maximumBytes)
-            throw new RegistryException($"blob at {path} exceeds the {maximumBytes}-byte limit");
-
-        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var buffer = new MemoryStream();
-        var chunk = new byte[81920];
-        int read;
-        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+        using (var writer = new Utf8JsonWriter(buffer))
         {
-            if (buffer.Length + read > maximumBytes)
-                throw new RegistryException($"blob at {path} exceeds the {maximumBytes}-byte limit");
-            buffer.Write(chunk, 0, read);
+            writer.WriteStartObject();
+            if (!string.IsNullOrEmpty(_auth.Token))
+            {
+                writer.WriteStartObject("auths");
+                writer.WriteStartObject(_registry);
+                writer.WriteString("registrytoken", _auth.Token);
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+            }
+            else if (!string.IsNullOrEmpty(_auth.CredentialHelper))
+            {
+                writer.WriteStartObject("credHelpers");
+                writer.WriteString(_registry, CredentialHelperSuffix(_auth.CredentialHelper));
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndObject();
         }
 
-        return buffer.ToArray();
+        // An empty object still blocks the ambient Docker config (H2).
+        var path = Path.Combine(_workDirectory.Value, "auth.json");
+        WritePrivateFile(path, buffer.ToArray());
+        return path;
     }
 
-    private static bool IsRedirect(HttpStatusCode status) => (int)status is 301 or 302 or 303 or 307 or 308;
-
-    private void ValidateRealm(Uri realm)
+    /// <summary>oras only understands helper names, so an absolute helper is exposed as a PATH shim.</summary>
+    private string CredentialHelperSuffix(string helper)
     {
-        if (realm.UserInfo.Length > 0 || realm.Fragment.Length > 0)
-            throw new RegistryException("registry bearer realm must not carry userinfo or a fragment", auth: true);
-        if (realm.Scheme != Uri.UriSchemeHttps && !(realm.Scheme == Uri.UriSchemeHttp && _auth.Insecure))
-            throw new RegistryException("registry bearer realm must use HTTPS", auth: true);
+        if (!helper.Contains('/') && !helper.Contains('\\'))
+            return helper;
+
+        var target = ValidateCredentialHelper(Path.GetFullPath(helper));
+        var suffix = "narwhal";
+        var link = Path.Combine(_workDirectory.Value, "docker-credential-" + suffix);
+        try
+        {
+            File.Delete(link);
+            File.CreateSymbolicLink(link, target);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            throw new RegistryException($"credential helper '{helper}' could not be wired up: {e.Message}", auth: true);
+        }
+
+        _credentialHelperSuffix = suffix;
+        return suffix;
     }
 
-    private async Task<RegistryCredential?> ResolveCredentialAsync(CancellationToken cancellationToken)
+    private static string ValidateCredentialHelper(string path)
     {
-        return _credential ??= await RegistryCredentialsResolver.ResolveAsync(_auth, _baseAddress, cancellationToken);
+        if (!File.Exists(path))
+            throw new RegistryException($"credential helper '{path}' does not exist", auth: true);
+
+        string target;
+        try
+        {
+            target = File.ResolveLinkTarget(path, returnFinalTarget: true)?.FullName ?? path;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            throw new RegistryException($"credential helper '{path}' could not be resolved: {e.Message}", auth: true);
+        }
+
+        if (!File.Exists(target))
+            throw new RegistryException($"credential helper '{path}' does not exist", auth: true);
+
+        if (!OperatingSystem.IsLinux())
+            return target;
+
+        PosixFile.Metadata metadata;
+        try
+        {
+            metadata = PosixFile.StatPath(target);
+        }
+        catch (IOException e)
+        {
+            throw new RegistryException($"credential helper '{path}' could not be inspected: {e.Message}", auth: true);
+        }
+
+        if (!metadata.IsRegular)
+            throw new RegistryException($"credential helper '{path}' is not a regular file", auth: true);
+        if ((metadata.Mode & AnyExecuteBit) == 0)
+            throw new RegistryException($"credential helper '{path}' is not executable", auth: true);
+        if (metadata.IsGroupOrOtherWritable)
+            throw new RegistryException($"credential helper '{path}' is writable by group or others", auth: true);
+        var euid = GetEuid();
+        if (metadata.Uid != euid && metadata.Uid != 0)
+            throw new RegistryException($"credential helper '{path}' is not owned by root or the current user", auth: true);
+
+        return target;
     }
 
-    public void Dispose() => _http.Dispose();
+    private IReadOnlyDictionary<string, string> ChildEnvironment
+    {
+        get
+        {
+            var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["DOCKER_CONFIG"] = Path.Combine(_workDirectory.Value, "docker"),
+            };
 
-    private sealed record CachedToken(string Token, DateTimeOffset RefreshAt);
+            if (_credentialHelperSuffix is not null)
+            {
+                var path = Environment.GetEnvironmentVariable("PATH");
+                environment["PATH"] = string.IsNullOrEmpty(path)
+                    ? _workDirectory.Value
+                    : _workDirectory.Value + ":" + path;
+            }
+
+            return environment;
+        }
+    }
+
+    private async Task VerifyPushedBlobAsync(string target, string digest, CancellationToken cancellationToken)
+    {
+        var result = await RunAsync(
+            ["blob", "fetch", "--descriptor", "--no-tty"],
+            target,
+            stream: false,
+            cancellationToken);
+
+        if (!result.Ok)
+            ThrowFor(result, "verify blob", target, manifestPush: false);
+
+        var reported = DescriptorDigest(result);
+        if (reported is null)
+            throw new RegistryException($"oras did not report a descriptor for pushed blob {target}");
+        if (!string.Equals(reported, digest, StringComparison.Ordinal))
+            throw new RegistryException(
+                $"registry reported digest {reported} for pushed blob {target}, expected {digest}");
+    }
+
+    private static string? DescriptorDigest(ProcessResult result)
+    {
+        var text = result.StdOut.Trim();
+        if (text.Length == 0)
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty("digest", out var digest) &&
+                   digest.ValueKind == JsonValueKind.String
+                ? digest.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<byte[]> ReadFileAsync(
+        string path,
+        long limit,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists)
+            throw new RegistryException($"oras did not write {description}");
+        if (info.Length > limit)
+            throw new RegistryException($"{description} exceeds the {limit}-byte limit");
+
+        var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+        if (bytes.LongLength > limit)
+            throw new RegistryException($"{description} exceeds the {limit}-byte limit");
+        return bytes;
+    }
+
+    private string TempPath(string prefix, string extension) =>
+        Path.Combine(_workDirectory.Value, prefix + Guid.NewGuid().ToString("N") + extension);
+
+    private string WriteTempFile(string prefix, string extension, ReadOnlySpan<byte> bytes)
+    {
+        var path = TempPath(prefix, extension);
+        WritePrivateFile(path, bytes);
+        return path;
+    }
+
+    private static void WritePrivateFile(string path, ReadOnlySpan<byte> bytes)
+    {
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+        };
+        if (!OperatingSystem.IsWindows())
+            options.UnixCreateMode = PrivateFileMode;
+
+        using var stream = new FileStream(path, options);
+        stream.Write(bytes);
+    }
+
+    private static void DeleteQuietly(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // A leftover temp file is removed with the work directory on dispose.
+        }
+    }
+
+    private static Reporter SilentReporter() =>
+        new(json: false, verbose: false, stdout: TextWriter.Null, stderr: TextWriter.Null);
+
+    private static uint GetEuid() => OperatingSystem.IsLinux() ? geteuid() : 0;
+
+    [DllImport("libc")]
+    private static extern uint geteuid();
+
+    public void Dispose()
+    {
+        if (!_workDirectory.IsValueCreated)
+            return;
+
+        try
+        {
+            Directory.Delete(_workDirectory.Value, recursive: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Best-effort cleanup of the temp directory.
+        }
+    }
 }
 
 internal static class OciManifestParser
@@ -667,6 +799,7 @@ internal static class OciManifestParser
 
 internal sealed record RegistryCredential(string Username, string Secret);
 
+/// <summary>Resolves image-pull credentials for podman; oras accepts the same config.</summary>
 internal static class RegistryCredentialsResolver
 {
     public static async Task<RegistryCredential?> ResolveAsync(
@@ -685,71 +818,6 @@ internal static class RegistryCredentialsResolver
 
     public static string BasicToken(string username, string secret) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{secret}"));
-}
-
-internal sealed class BearerChallenge
-{
-    public required string Realm { get; init; }
-    public string? Service { get; init; }
-    public string? Scope { get; init; }
-
-    public static BearerChallenge? TryParse(IEnumerable<AuthenticationHeaderValue> headers)
-    {
-        foreach (var header in headers)
-        {
-            if (!string.Equals(header.Scheme, "Bearer", StringComparison.OrdinalIgnoreCase) ||
-                string.IsNullOrEmpty(header.Parameter))
-                continue;
-
-            var fields = ParseFields(header.Parameter);
-            if (!fields.TryGetValue("realm", out var realm) || string.IsNullOrEmpty(realm))
-                continue;
-
-            return new BearerChallenge
-            {
-                Realm = realm,
-                Service = fields.GetValueOrDefault("service"),
-                Scope = fields.GetValueOrDefault("scope"),
-            };
-        }
-
-        return null;
-    }
-
-    private static Dictionary<string, string> ParseFields(string value)
-    {
-        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var index = 0;
-        while (index < value.Length)
-        {
-            while (index < value.Length && (value[index] == ',' || char.IsWhiteSpace(value[index])))
-                index++;
-            var equals = value.IndexOf('=', index);
-            if (equals < 0)
-                break;
-            var name = value[index..equals].Trim();
-            index = equals + 1;
-            if (index < value.Length && value[index] == '"')
-            {
-                index++;
-                var end = value.IndexOf('"', index);
-                if (end < 0)
-                    break;
-                fields[name] = value[index..end];
-                index = end + 1;
-            }
-            else
-            {
-                var end = value.IndexOf(',', index);
-                if (end < 0)
-                    end = value.Length;
-                fields[name] = value[index..end].Trim();
-                index = end;
-            }
-        }
-
-        return fields;
-    }
 }
 
 internal static class CredentialHelper

@@ -1486,6 +1486,15 @@ it to podman as `--authfile`, and removes it after the pull. Tokens are held in
 memory otherwise. A status push uses the same in-memory credential and never
 writes the token to the state directory.
 
+Registry reads and status pushes run through the `oras` CLI. oras follows
+HTTPS-to-HTTP redirects from a registry or proxy, so a misconfigured endpoint
+can downgrade the rest of a request to plaintext. Desired-state and status
+integrity still comes from the signature over canonical bytes, and blobs are
+still checked against their digests, but an on-path attacker can observe or
+block traffic after the downgrade. Do not point a target at a registry or mirror
+that redirects to HTTP; `insecure = true` is the only supported way to use
+plain HTTP and it applies for the whole request.
+
 ### 3.9 Status content and retention details
 
 The status repository is separate from desired and images so a compromised host
