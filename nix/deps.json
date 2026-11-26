@@ -3,5 +3,10 @@
     "pname": "BouncyCastle.Cryptography",
     "version": "2.7.0",
     "hash": "sha256-8JH/zKtNA5k+Zgus4ndlmnne4JcvVNfx9L1G1oCWYkE="
+  },
+  {
+    "pname": "Tomlyn",
+    "version": "2.11.1",
+    "hash": "sha256-ZQ21jufa5GRuSvcFmm+se1CHgWtlYzvDYwWkZ3tG6DY="
   }
 ]

@@ -7,23 +7,25 @@ namespace Narwhal.Tests;
 public class TomlInvalidInputTests
 {
     [Theory]
-    [InlineData("name = \"ok\"\nbroken =\n", 2, 9, "expected a value")]
-    [InlineData("name = \"abc\n", 1, 12, "unterminated string")]
-    [InlineData("name = 'abc\n", 1, 12, "unterminated string")]
-    [InlineData("ports = [\"a\", \"b\"\n", 2, 1, "expected ',' or ']'")]
-    [InlineData("a = 1\na = 2\n", 2, 6, "duplicate key 'a'")]
-    [InlineData("[build\n", 1, 7, "expected ']'")]
-    [InlineData("[[service]\n", 1, 11, "expected ']'")]
-    [InlineData("x = \"a\\q\"\n", 1, 9, "invalid escape sequence")]
-    [InlineData("x = \"\\u12\"\n", 1, 10, "invalid unicode escape")]
-    [InlineData("= 1\n", 1, 1, "expected a key")]
-    [InlineData("a = 1 b\n", 1, 7, "expected a newline after the value")]
-    [InlineData("x = \"\"\"abc\n", 2, 1, "unterminated multi-line string")]
-    [InlineData("x = '''abc\n", 2, 1, "unterminated multi-line string")]
-    [InlineData("x = { a = 1\n", 1, 12, "expected '}' but found")]
-    [InlineData("[[a]]\nx = 1\n[a]\n", 3, 4, "cannot redefine 'a' as a table")]
-    [InlineData("a = 1\na.b = 2\n", 2, 8, "cannot assign a nested key")]
-    [InlineData("x = { a = 1, a = 2 }\n", 1, 20, "duplicate key 'a' in inline table")]
+    // Tomlyn reports the offending token, so positions point at the start of
+    // the token rather than at the end of the previous value.
+    [InlineData("name = \"ok\"\nbroken =\n", 2, 9, "while expecting a value")]
+    [InlineData("name = \"abc\n", 1, 12, "Invalid newline in a string")]
+    [InlineData("name = 'abc\n", 1, 12, "Invalid newline in a string")]
+    [InlineData("ports = [\"a\", \"b\"\n", 2, 1, "Expecting a closing `]` for an array")]
+    [InlineData("a = 1\na = 2\n", 2, 1, "already defined")]
+    [InlineData("[build\n", 1, 7, "while expecting `]`")]
+    [InlineData("[[service]\n", 1, 10, "while expecting `]]`")]
+    [InlineData("x = \"a\\q\"\n", 1, 8, "Unexpected escape character")]
+    [InlineData("x = \"\\u12\"\n", 1, 10, "Unexpected escape character")]
+    [InlineData("= 1\n", 1, 1, "Unexpected token [=] found")]
+    [InlineData("a = 1 b\n", 1, 7, "while expecting token `newline`")]
+    [InlineData("x = \"\"\"abc\n", 1, 11, "Invalid End-Of-File found for multi-line string")]
+    [InlineData("x = '''abc\n", 1, 11, "Invalid End-Of-File found for multi-line literal string")]
+    [InlineData("x = { a = 1\n", 2, 1, "while parsing inline table")]
+    [InlineData("[[a]]\nx = 1\n[a]\n", 3, 1, "already defined")]
+    [InlineData("a = 1\na.b = 2\n", 2, 1, "already defined")]
+    [InlineData("x = { a = 1, a = 2 }\n", 1, 14, "already defined")]
     public void RejectsInvalidDocumentsAtTheRightPosition(string document, int line, int column, string message)
     {
         var error = Assert.Throws<TomlException>(() => TomlParser.Parse(document));
@@ -44,7 +46,7 @@ public class TomlInvalidInputTests
         // Surrogate and above-U+10FFFF code points are not valid TOML and must
         // not escape as ArgumentOutOfRangeException/OverflowException.
         var error = Assert.Throws<TomlException>(() => TomlParser.Parse(document));
-        Assert.Contains("invalid unicode escape", error.Message);
+        Assert.Contains("Invalid Unicode scalar value", error.Message);
     }
 
     [Theory]
@@ -52,12 +54,18 @@ public class TomlInvalidInputTests
     [InlineData("count = 0o17", 15L)]
     [InlineData("count = 0b1010", 10L)]
     [InlineData("count = 1_000_000", 1_000_000L)]
-    [InlineData("count = -0x10", -16L)]
     [InlineData("count = +42", 42L)]
     public void ParsesEveryIntegerForm(string document, long expected)
     {
         var table = TomlParser.Parse(document);
         Assert.Equal(expected, Assert.IsType<TomlInteger>(table.Get("count")).Value);
+    }
+
+    [Fact]
+    public void RejectsSignedNonDecimalIntegers()
+    {
+        // TOML only allows a sign on decimal integers.
+        Assert.Throws<TomlException>(() => TomlParser.Parse("count = -0x10\n"));
     }
 
     [Theory]
@@ -102,5 +110,22 @@ public class TomlInvalidInputTests
         Assert.Empty(Assert.IsType<TomlTable>(table.Get("map")).Entries);
         var nested = Assert.IsType<TomlTable>(Assert.IsType<TomlTable>(table.Get("nested")).Get("a"));
         Assert.Equal(1, Assert.IsType<TomlInteger>(nested.Get("b")).Value);
+    }
+
+    [Theory]
+    [InlineData("name = \"ok\"\nbroken =\n")]
+    [InlineData("x = \"a\\q\"\n")]
+    [InlineData("x = \"\\u12\"\n")]
+    [InlineData("a = 1\na = 2\n")]
+    [InlineData("[build\n")]
+    [InlineData("x = { a = 1\n")]
+    [InlineData("= 1\n")]
+    public void InvalidInputsAlwaysReportAPositionAndSnippet(string document)
+    {
+        var error = Assert.Throws<TomlException>(() => TomlParser.Parse(document));
+
+        Assert.True(error.Line >= 1, $"expected a 1-based line, got {error.Line}");
+        Assert.True(error.Column >= 1, $"expected a 1-based column, got {error.Column}");
+        Assert.False(string.IsNullOrWhiteSpace(error.Snippet), "the error should carry a source snippet");
     }
 }

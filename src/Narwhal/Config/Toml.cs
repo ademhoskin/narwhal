@@ -1,4 +1,6 @@
-using System.Text;
+using Tomlyn;
+using Tomlyn.Parsing;
+using Tomlyn.Syntax;
 
 namespace Narwhal.Config;
 
@@ -67,66 +69,80 @@ public sealed class TomlException(string message, int line, int column, string? 
 }
 
 /// <summary>
-/// A dependency-free TOML parser covering the subset narwhal manifests need:
-/// tables, arrays of tables, dotted keys, basic/literal strings, multi-line
-/// strings, integers, floats, booleans, arrays, inline tables and comments.
-/// Written by hand so the AOT binary needs no reflection-based deserializers.
+/// Parses TOML with Tomlyn's strict syntax parser, then adapts the syntax tree
+/// to the small <see cref="TomlValue"/> tree the readers consume. The syntax
+/// tree keeps the parser AOT-safe and preserves raw datetime tokens.
 /// </summary>
-public sealed class TomlParser
+public static class TomlParser
 {
-    private readonly string _text;
-    private int _pos;
-    private int _line = 1;
-    private int _col = 1;
+    private const string SourceName = "<input>";
 
-    private TomlParser(string text) => _text = text;
+    /// <summary>
+    /// Maximum nesting depth accepted by the adapter. Chosen well above any real
+    /// manifest so the limit is a deliberate guard rather than a library default.
+    /// </summary>
+    internal const int MaxNestingDepth = 1024;
 
     public static TomlTable Parse(string text)
     {
-        var parser = new TomlParser(text);
-        return parser.ParseDocument();
+        ArgumentNullException.ThrowIfNull(text);
+
+        DocumentSyntax document;
+        try
+        {
+            // Tomlyn's strict parser implements the TOML 1.1 grammar, including the 1.1-only constructs.
+            var options = new TomlSerializerOptions { MaxDepth = MaxNestingDepth };
+            document = SyntaxParser.ParseStrict(text, options, SourceName, validate: true);
+        }
+        catch (Tomlyn.TomlException e)
+        {
+            throw Translate(e, text);
+        }
+
+        return Build(document);
     }
 
-    private TomlTable ParseDocument()
+    private static TomlTable Build(DocumentSyntax document)
     {
         var root = new TomlTable();
-        var current = root;
+        foreach (var keyValue in document.KeyValues!)
+            Assign(root, KeyPath(keyValue.Key!), ConvertValue(keyValue.Value!));
 
-        while (true)
+        foreach (var table in document.Tables!)
         {
-            SkipWhitespaceAndComments(includeNewlines: true);
-            if (AtEnd)
-                break;
-
-            if (Peek() == '[')
+            var path = KeyPath(table.Name!);
+            if (table is TableArraySyntax)
             {
-                if (Peek(1) == '[')
+                var parent = ResolveParent(root, path);
+                var name = path[^1];
+                if (parent.Get(name) is not TomlArray array)
                 {
-                    current = ParseArrayTableHeader(root);
+                    array = new TomlArray([]);
+                    parent.Entries[name] = array;
                 }
-                else
-                {
-                    current = ParseTableHeader(root);
-                }
-                ExpectLineEnd();
+
+                var entry = new TomlTable();
+                array.Items.Add(entry);
+                AddItems(entry, table);
             }
             else
             {
-                ParseKeyValue(current);
-                ExpectLineEnd();
+                var target = ResolveTable(root, path);
+                AddItems(target, table);
             }
         }
 
         return root;
     }
 
-    private TomlTable ParseTableHeader(TomlTable root)
+    private static void AddItems(TomlTable table, TableSyntaxBase syntax)
     {
-        Expect('[');
-        var path = ParseKeyPath();
-        SkipInlineWhitespace();
-        Expect(']');
+        foreach (var keyValue in syntax.Items!)
+            Assign(table, KeyPath(keyValue.Key!), ConvertValue(keyValue.Value!));
+    }
 
+    private static TomlTable ResolveTable(TomlTable root, List<string> path)
+    {
         var table = root;
         for (var i = 0; i < path.Count; i++)
         {
@@ -135,605 +151,209 @@ public sealed class TomlParser
 
             if (i == path.Count - 1)
             {
-                if (existing is TomlTable t)
-                    return t;
+                if (existing is TomlTable found)
+                    return found;
                 if (existing is not null)
-                    throw Error($"cannot redefine '{string.Join('.', path)}' as a table, it is a {existing.Kind}");
+                    throw new TomlException($"cannot redefine '{string.Join('.', path)}' as a table", 1, 1);
 
-                var created = new TomlTable();
-                table.Entries[segment] = created;
-                return created;
+                return CreateTable(table, segment);
             }
 
             table = existing switch
             {
-                TomlTable t => t,
-                TomlArray a when a.Items.Count > 0 && a.Items[^1] is TomlTable last => last, // [[x]] then [x.y]
-                null => CreateIntermediate(table, segment),
-                _ => throw Error($"'{string.Join('.', path)}' conflicts with an existing {existing.Kind}"),
+                TomlTable found => found,
+                TomlArray { Items: [.., TomlTable last] } => last,
+                null => CreateTable(table, segment),
+                _ => throw new TomlException($"'{string.Join('.', path)}' conflicts with an existing value", 1, 1),
             };
         }
 
         return table;
     }
 
-    private TomlTable CreateIntermediate(TomlTable parent, string key)
+    private static TomlTable ResolveParent(TomlTable root, List<string> path)
     {
-        var created = new TomlTable();
-        parent.Entries[key] = created;
-        return created;
-    }
-
-    private TomlTable ParseArrayTableHeader(TomlTable root)
-    {
-        Expect('[');
-        Expect('[');
-        var path = ParseKeyPath();
-        SkipInlineWhitespace();
-        Expect(']');
-        Expect(']');
-
-        TomlTable table = root;
+        var table = root;
         for (var i = 0; i < path.Count - 1; i++)
         {
             var segment = path[i];
             table = table.Get(segment) switch
             {
-                TomlTable t => t,
-                TomlArray a when a.Items.Count > 0 && a.Items[^1] is TomlTable last => last,
-                null => CreateIntermediate(table, segment),
-                var other => throw Error($"'{segment}' is a {other.Kind}, expected a table"),
+                TomlTable found => found,
+                TomlArray { Items: [.., TomlTable last] } => last,
+                null => CreateTable(table, segment),
+                _ => throw new TomlException($"'{segment}' is not a table", 1, 1),
             };
         }
 
-        var name = path[^1];
-        if (table.Get(name) is not TomlArray array)
-        {
-            array = new TomlArray([]);
-            table.Entries[name] = array;
-        }
-        else
-        {
-            foreach (var item in array.Items)
-            {
-                if (item is not TomlTable)
-                    throw Error($"cannot append a table to '{name}', it is an array of {item.Kind}");
-            }
-        }
-
-        var entry = new TomlTable();
-        array.Items.Add(entry);
-        return entry;
+        return table;
     }
 
-    private void ParseKeyValue(TomlTable table)
+    private static TomlTable CreateTable(TomlTable parent, string key)
     {
-        var path = ParseKeyPath();
-        SkipInlineWhitespace();
-        Expect('=');
-        SkipInlineWhitespace();
+        var table = new TomlTable();
+        parent.Entries[key] = table;
+        return table;
+    }
 
-        // Value may continue onto further lines only if it is an array, inline
-        // table or multi-line string, all of which consume their own newlines.
-        var value = ParseValue();
-
+    private static void Assign(TomlTable table, List<string> path, TomlValue value)
+    {
         var target = table;
         for (var i = 0; i < path.Count - 1; i++)
         {
             var segment = path[i];
             target = target.Get(segment) switch
             {
-                TomlTable t => t,
-                null => CreateIntermediate(target, segment),
-                var other => throw Error($"'{segment}' is a {other.Kind}, cannot assign a nested key"),
+                TomlTable found => found,
+                null => CreateTable(target, segment),
+                _ => throw new TomlException($"'{segment}' is not a table", 1, 1),
             };
         }
 
-        var last = path[^1];
-        if (!target.Entries.TryAdd(last, value))
-            throw Error($"duplicate key '{string.Join('.', path)}'");
+        if (!target.Entries.TryAdd(path[^1], value))
+            throw new TomlException($"duplicate key '{string.Join('.', path)}'", 1, 1);
     }
 
-    private List<string> ParseKeyPath()
+    private static List<string> KeyPath(KeySyntax key)
     {
-        var parts = new List<string>();
-        while (true)
-        {
-            SkipInlineWhitespace();
-            parts.Add(ParseSimpleKey());
-            SkipInlineWhitespace();
-            if (Peek() != '.')
-                return parts;
-            Advance(); // '.'
-        }
+        var path = new List<string> { KeyText(key.Key!) };
+        foreach (var dotted in key.DotKeys!)
+            path.Add(KeyText(dotted.Key!));
+        return path;
     }
 
-    private string ParseSimpleKey()
+    private static string KeyText(BareKeyOrStringValueSyntax key) => key switch
     {
-        var c = Peek();
-        if (c == '"')
-            return ParseBasicString();
-        if (c == '\'')
-            return ParseLiteralString();
+        StringValueSyntax text => text.Value!,
+        BareKeySyntax bare => bare.Key!.Text!,
+        _ => throw new TomlException($"unsupported key token '{key.Kind}'", 1, 1),
+    };
 
-        var start = _pos;
-        while (!AtEnd)
-        {
-            c = Peek();
-            if (char.IsLetterOrDigit(c) || c is '_' or '-')
-                Advance();
-            else
-                break;
-        }
-
-        if (_pos == start)
-            throw Error("expected a key");
-        return _text[start.._pos];
-    }
-
-    private TomlValue ParseValue()
+    private static TomlValue ConvertValue(ValueSyntax value) => value switch
     {
-        var c = Peek();
-        return c switch
-        {
-            '"' => _text.AsSpan(_pos).StartsWith("\"\"\"") ? new TomlString(ParseMultilineBasicString()) : new TomlString(ParseBasicString()),
-            '\'' => _text.AsSpan(_pos).StartsWith("'''") ? new TomlString(ParseMultilineLiteralString()) : new TomlString(ParseLiteralString()),
-            '[' => ParseArray(),
-            '{' => ParseInlineTable(),
-            't' or 'f' => ParseBoolean(),
-            _ => ParseNumberOrDate(),
-        };
-    }
+        StringValueSyntax text => new TomlString(text.Value!),
+        IntegerValueSyntax integer => new TomlInteger(integer.Value),
+        FloatValueSyntax number => new TomlFloat(number.Value),
+        BooleanValueSyntax flag => new TomlBoolean(flag.Value),
+        DateTimeValueSyntax timestamp => new TomlDateTime(timestamp.Token!.Text!),
+        ArraySyntax array => new TomlArray(array.Items!.Select(item => ConvertValue(item.Value!)).ToList()),
+        InlineTableSyntax table => ConvertInlineTable(table),
+        _ => throw new TomlException($"unsupported TOML value '{value.Kind}'", 1, 1),
+    };
 
-    private TomlArray ParseArray()
+    private static TomlTable ConvertInlineTable(InlineTableSyntax syntax)
     {
-        Expect('[');
-        var items = new List<TomlValue>();
-        while (true)
-        {
-            SkipWhitespaceAndComments(includeNewlines: true);
-            if (Peek() == ']')
-            {
-                Advance();
-                return new TomlArray(items);
-            }
-
-            items.Add(ParseValue());
-            SkipWhitespaceAndComments(includeNewlines: true);
-
-            if (Peek() == ',')
-            {
-                Advance();
-                continue;
-            }
-
-            if (Peek() == ']')
-            {
-                Advance();
-                return new TomlArray(items);
-            }
-
-            throw Error("expected ',' or ']' in array");
-        }
-    }
-
-    private TomlTable ParseInlineTable()
-    {
-        Expect('{');
         var table = new TomlTable();
-        SkipInlineWhitespace();
-        if (Peek() == '}')
-        {
-            Advance();
-            return table;
-        }
-
-        while (true)
-        {
-            SkipInlineWhitespace();
-            var path = ParseKeyPath();
-            SkipInlineWhitespace();
-            Expect('=');
-            SkipInlineWhitespace();
-            var value = ParseValue();
-            SkipInlineWhitespace();
-
-            var target = table;
-            for (var i = 0; i < path.Count - 1; i++)
-            {
-                var segment = path[i];
-                target = target.Get(segment) switch
-                {
-                    TomlTable t => t,
-                    null => CreateIntermediate(target, segment),
-                    var other => throw Error($"'{segment}' is a {other.Kind}, cannot assign a nested key"),
-                };
-            }
-
-            if (!target.Entries.TryAdd(path[^1], value))
-                throw Error($"duplicate key '{string.Join('.', path)}' in inline table");
-
-            if (Peek() == ',')
-            {
-                Advance();
-                SkipInlineWhitespace();
-                continue;
-            }
-
-            Expect('}');
-            return table;
-        }
+        foreach (var item in syntax.Items!)
+            Assign(table, KeyPath(item.KeyValue!.Key!), ConvertValue(item.KeyValue.Value!));
+        return table;
     }
 
-    private TomlBoolean ParseBoolean()
+    private static TomlException Translate(Tomlyn.TomlException error, string text)
     {
-        if (TryConsume("true"))
-            return new TomlBoolean(true);
-        if (TryConsume("false"))
-            return new TomlBoolean(false);
-        throw Error("expected 'true' or 'false'");
+        var diagnostic = error.Diagnostics
+            is { Count: > 0 } diagnostics
+            ? diagnostics.FirstOrDefault(d => d.Kind == DiagnosticMessageKind.Error) ?? diagnostics[0]
+            : null;
+
+        var rawMessage = diagnostic?.Message.Trim() ?? string.Empty;
+        if (rawMessage.Length == 0)
+            rawMessage = error.Message.Trim();
+        var isDepthError = IsDepthError(rawMessage);
+        var message = isDepthError
+            ? $"the document exceeds the maximum nesting depth of {MaxNestingDepth}"
+            : rawMessage;
+
+        if (diagnostic is null)
+        {
+            if (isDepthError && DepthViolationOffset(text) is int depthOffset)
+            {
+                var (depthLine, depthColumn) = LineColumn(text, depthOffset);
+                return new TomlException(message, depthLine, depthColumn, Snippet(text, depthOffset));
+            }
+
+            return new TomlException(message, 1, 1, Snippet(text, 0));
+        }
+
+        var offset = Math.Clamp(diagnostic.Span.Start.Offset, 0, text.Length);
+        var (line, column) = LineColumn(text, offset);
+        return new TomlException(message, line, column, Snippet(text, offset));
     }
 
-    private TomlValue ParseNumberOrDate()
+    private static bool IsDepthError(string message) =>
+        message.Contains("maximum depth", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Tomlyn reports a depth violation without a source span, so locate the
+    /// container that exceeds the limit by tokenizing the document instead.
+    /// </summary>
+    private static int? DepthViolationOffset(string text)
     {
-        var start = _pos;
-        while (!AtEnd)
-        {
-            var c = Peek();
-            if (char.IsLetterOrDigit(c) || c is '_' or '+' or '-' or '.' or ':' or 'T' or 'Z' or ' ')
-            {
-                // A space only continues the token in a datetime ("1979-05-27 07:32:00").
-                if (c == ' ' && !LooksLikeDateStart(_text.AsSpan(start, _pos - start)))
-                    break;
-                Advance();
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        var raw = _text[start.._pos].TrimEnd();
-        if (raw.Length == 0)
-            throw Error("expected a value");
-
-        if (LooksLikeDateStart(raw.AsSpan()))
-            return new TomlDateTime(raw);
-
-        if (TryParseInteger(raw, out var integer))
-            return new TomlInteger(integer);
-
-        if (double.TryParse(raw.Replace("_", string.Empty), System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var real))
-            return new TomlFloat(real);
-
-        throw Error($"unrecognised value '{raw}'");
-    }
-
-    private static bool LooksLikeDateStart(ReadOnlySpan<char> token) =>
-        token.Length >= 10
-        && char.IsAsciiDigit(token[0]) && char.IsAsciiDigit(token[1]) && char.IsAsciiDigit(token[2]) && char.IsAsciiDigit(token[3])
-        && token[4] == '-';
-
-    private static bool TryParseInteger(string raw, out long value)
-    {
-        value = 0;
-        var text = raw.Replace("_", string.Empty);
-        var sign = 1;
-        if (text.StartsWith('-'))
-        {
-            sign = -1;
-            text = text[1..];
-        }
-        else if (text.StartsWith('+'))
-        {
-            text = text[1..];
-        }
-
         try
         {
-            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                value = sign * Convert.ToInt64(text[2..], 16);
-            else if (text.StartsWith("0o", StringComparison.OrdinalIgnoreCase))
-                value = sign * Convert.ToInt64(text[2..], 8);
-            else if (text.StartsWith("0b", StringComparison.OrdinalIgnoreCase))
-                value = sign * Convert.ToInt64(text[2..], 2);
-            else
-                return long.TryParse(text, System.Globalization.NumberStyles.None,
-                    System.Globalization.CultureInfo.InvariantCulture, out value) && (value *= sign) == value;
-        }
-        catch (Exception e) when (e is FormatException or OverflowException or ArgumentException)
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    private string ParseBasicString()
-    {
-        Expect('"');
-        var builder = new StringBuilder();
-        while (true)
-        {
-            if (AtEnd)
-                throw Error("unterminated string");
-            var c = Peek();
-            if (c == '"')
+            var lexer = TomlLexer.Create(text, SourceName);
+            var depth = 0;
+            while (lexer.MoveNext())
             {
-                Advance();
-                return builder.ToString();
-            }
-            if (c == '\n')
-                throw Error("unterminated string");
-
-            if (c == '\\')
-            {
-                Advance();
-                builder.Append(ParseEscape());
-                continue;
-            }
-
-            builder.Append(c);
-            Advance();
-        }
-    }
-
-    private string ParseLiteralString()
-    {
-        Expect('\'');
-        var start = _pos;
-        while (!AtEnd && Peek() != '\'')
-        {
-            if (Peek() == '\n')
-                throw Error("unterminated string");
-            Advance();
-        }
-        if (AtEnd)
-            throw Error("unterminated string");
-        var value = _text[start.._pos];
-        Advance(); // closing quote
-        return value;
-    }
-
-    private string ParseMultilineBasicString()
-    {
-        Expect('"');
-        Expect('"');
-        Expect('"');
-        ConsumeNewlineIfPresent();
-
-        var builder = new StringBuilder();
-        while (true)
-        {
-            if (AtEnd)
-                throw Error("unterminated multi-line string");
-            if (_text.AsSpan(_pos).StartsWith("\"\"\""))
-            {
-                Advance(3);
-                // TOML allows up to two additional quotes as content.
-                while (Peek() == '"')
+                switch (lexer.Current.Kind)
                 {
-                    builder.Append('"');
-                    Advance();
+                    case TokenKind.OpenBracketDouble:
+                    case TokenKind.OpenBracket:
+                    case TokenKind.OpenBrace:
+                        var opened = lexer.Current.Kind == TokenKind.OpenBracketDouble ? 2 : 1;
+                        if (depth + opened >= MaxNestingDepth)
+                            return lexer.CurrentSpan.Offset + (MaxNestingDepth - depth) - 1;
+                        depth += opened;
+                        break;
+                    case TokenKind.CloseBracketDouble:
+                        depth = Math.Max(0, depth - 2);
+                        break;
+                    case TokenKind.CloseBracket:
+                    case TokenKind.CloseBrace:
+                        depth = Math.Max(0, depth - 1);
+                        break;
                 }
-                return builder.ToString();
             }
+        }
+        catch (Tomlyn.TomlException)
+        {
+        }
 
-            var c = Peek();
-            if (c == '\\')
-            {
-                Advance();
-                if (SkipLineEndingBackslash(builder))
-                    continue;
-                builder.Append(ParseEscape());
+        return null;
+    }
+
+    private static (int Line, int Column) LineColumn(string text, int offset)
+    {
+        var line = 1;
+        var lineStart = 0;
+        for (var i = 0; i < offset; i++)
+        {
+            if (text[i] != '\n')
                 continue;
-            }
-
-            builder.Append(c);
-            Advance();
-        }
-    }
-
-    private bool SkipLineEndingBackslash(StringBuilder builder)
-    {
-        var save = _pos;
-        var saveLine = _line;
-        var saveCol = _col;
-        while (Peek() is ' ' or '\t')
-            Advance();
-        if (Peek() is not ('\n' or '\r'))
-        {
-            _pos = save;
-            _line = saveLine;
-            _col = saveCol;
-            return false;
+            line++;
+            lineStart = i + 1;
         }
 
-        // Trim trailing whitespace on the current line, as TOML requires.
-        while (builder.Length > 0 && builder[^1] is ' ' or '\t')
-            builder.Length--;
-
-        SkipWhitespaceAndComments(includeNewlines: true);
-        return true;
+        return (line, offset - lineStart + 1);
     }
 
-    private string ParseMultilineLiteralString()
+    private static string Snippet(string text, int offset)
     {
-        Expect('\'');
-        Expect('\'');
-        Expect('\'');
-        ConsumeNewlineIfPresent();
-
-        var start = _pos;
-        while (!AtEnd)
-        {
-            if (_text.AsSpan(_pos).StartsWith("'''"))
-            {
-                var value = _text[start.._pos];
-                Advance(3);
-                while (Peek() == '\'')
-                {
-                    value += "'";
-                    Advance();
-                }
-                return value;
-            }
-            Advance();
-        }
-
-        throw Error("unterminated multi-line string");
-    }
-
-    private void ConsumeNewlineIfPresent()
-    {
-        if (Peek() == '\r' && Peek(1) == '\n')
-            Advance(2);
-        else if (Peek() == '\n')
-            Advance();
-    }
-
-    private string ParseEscape()
-    {
-        if (AtEnd)
-            throw Error("unterminated escape sequence");
-        var c = Peek();
-        Advance();
-        return c switch
-        {
-            'b' => "\b",
-            't' => "\t",
-            'n' => "\n",
-            'f' => "\f",
-            'r' => "\r",
-            'e' => "\u001b",
-            '"' => "\"",
-            '\\' => "\\",
-            'u' => ParseUnicodeEscape(4),
-            'U' => ParseUnicodeEscape(8),
-            _ => throw Error($"invalid escape sequence '\\{c}'"),
-        };
-    }
-
-    private string ParseUnicodeEscape(int digits)
-    {
-        var start = _pos;
-        for (var i = 0; i < digits; i++)
-        {
-            if (AtEnd || !Uri.IsHexDigit(Peek()))
-                throw Error("invalid unicode escape");
-            Advance();
-        }
-        var code = Convert.ToInt64(_text[start.._pos], 16);
-        if (code > 0x10FFFF || code is >= 0xD800 and <= 0xDFFF)
-            throw Error("invalid unicode escape");
-
-        return char.ConvertFromUtf32((int)code);
-    }
-
-    private void ExpectLineEnd()
-    {
-        SkipInlineWhitespace();
-        if (Peek() == '#')
-        {
-            while (!AtEnd && Peek() != '\n')
-                Advance();
-        }
-
-        if (AtEnd)
-            return;
-        if (Peek() == '\r' && Peek(1) == '\n')
-        {
-            Advance(2);
-            return;
-        }
-        if (Peek() == '\n')
-        {
-            Advance();
-            return;
-        }
-        throw Error("expected a newline after the value");
-    }
-
-    private void SkipWhitespaceAndComments(bool includeNewlines)
-    {
-        while (!AtEnd)
-        {
-            var c = Peek();
-            if (c is ' ' or '\t' || (includeNewlines && c is '\r' or '\n'))
-            {
-                Advance();
-                continue;
-            }
-            if (c == '#')
-            {
-                while (!AtEnd && Peek() != '\n')
-                    Advance();
-                continue;
-            }
-            break;
-        }
-    }
-
-    private void SkipInlineWhitespace()
-    {
-        while (!AtEnd && Peek() is ' ' or '\t')
-            Advance();
-    }
-
-    private void Expect(char expected)
-    {
-        if (AtEnd)
-            throw Error($"expected '{expected}' but reached end of input");
-        if (Peek() != expected)
-            throw Error($"expected '{expected}' but found '{Peek()}'");
-        Advance();
-    }
-
-    private bool TryConsume(string token)
-    {
-        if (!_text.AsSpan(_pos).StartsWith(token))
-            return false;
-        Advance(token.Length);
-        return true;
-    }
-
-    private bool AtEnd => _pos >= _text.Length;
-
-    private char Peek(int offset = 0)
-    {
-        var index = _pos + offset;
-        return index < _text.Length ? _text[index] : '\0';
-    }
-
-    private void Advance(int count = 1)
-    {
-        for (var i = 0; i < count && _pos < _text.Length; i++)
-        {
-            if (_text[_pos] == '\n')
-            {
-                _line++;
-                _col = 1;
-            }
-            else
-            {
-                _col++;
-            }
-            _pos++;
-        }
-    }
-
-    private TomlException Error(string message)
-    {
-        var lineStart = _pos;
-        while (lineStart > 0 && _text[lineStart - 1] != '\n')
+        var lineStart = offset;
+        while (lineStart > 0 && text[lineStart - 1] != '\n')
             lineStart--;
-        var lineEnd = _pos;
-        while (lineEnd < _text.Length && _text[lineEnd] != '\n')
+        var lineEnd = offset;
+        while (lineEnd < text.Length && text[lineEnd] != '\n')
             lineEnd++;
 
-        var snippet = _text[lineStart..lineEnd];
-        var caret = new string(' ', Math.Max(0, _col - 1)) + "^";
-        return new TomlException(message, _line, _col, snippet + "\n" + caret);
+        const int Context = 60;
+        var contextStart = Math.Max(lineStart, offset - Context);
+        var contextEnd = Math.Min(lineEnd, offset + Context);
+        var prefix = contextStart > lineStart ? "…" : string.Empty;
+        var suffix = contextEnd < lineEnd ? "…" : string.Empty;
+
+        var source = text[contextStart..contextEnd].TrimEnd('\r');
+        return prefix + source + suffix + "\n"
+            + new string(' ', prefix.Length + offset - contextStart) + "^";
     }
 }

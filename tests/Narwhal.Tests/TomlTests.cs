@@ -161,7 +161,7 @@ public class TomlTests
             """));
 
         Assert.Equal(2, error.Line);
-        Assert.Contains("expected a value", error.Message);
+        Assert.Contains("value", error.Message);
         Assert.NotNull(error.Snippet);
     }
 
@@ -173,7 +173,7 @@ public class TomlTests
             name = "b"
             """));
 
-        Assert.Contains("duplicate key", error.Message);
+        Assert.Contains("already defined", error.Message);
     }
 
     [Fact]
@@ -203,4 +203,64 @@ public class TomlTests
         Assert.Equal(0x10FFFF, char.ConvertToUtf32(value, 0));
         Assert.Equal(char.ConvertFromUtf32(0x10FFFF), value);
     }
+
+    [Fact]
+    public void ParsesToml11MultilineInlineTables()
+    {
+        var table = Parse("x = {\n a = 1\n}\n");
+
+        var x = Assert.IsType<TomlTable>(table.Get("x"));
+        Assert.Equal(1, Assert.IsType<TomlInteger>(x.Get("a")).Value);
+    }
+
+    [Fact]
+    public void ParsesToml11InlineTableTrailingComma()
+    {
+        var table = Parse("x = { a = 1, }\n");
+
+        var x = Assert.IsType<TomlTable>(table.Get("x"));
+        Assert.Equal(1, Assert.IsType<TomlInteger>(x.Get("a")).Value);
+    }
+
+    [Fact]
+    public void ParsesToml11HexEscapesInBasicStrings()
+    {
+        var table = Parse("x = \"\\x41\"\n");
+
+        Assert.Equal("A", Str(table, "x"));
+    }
+
+    [Fact]
+    public void ParsesToml11LocalTimes()
+    {
+        var table = Parse("x = 07:32:00\n");
+
+        Assert.Equal("07:32:00", Assert.IsType<TomlDateTime>(table.Get("x")).Raw);
+    }
+
+    [Fact]
+    public void ParsesToml11FloatInfinity()
+    {
+        var table = Parse("x = inf\n");
+
+        Assert.True(double.IsPositiveInfinity(Assert.IsType<TomlFloat>(table.Get("x")).Value));
+    }
+
+    [Fact]
+    public void EnforcesConfiguredNestingDepthAtTheBoundary()
+    {
+        var below = Parse(NestedArrays(TomlParser.MaxNestingDepth - 1));
+        Assert.Equal("array", below.Get("x")!.Kind);
+
+        var error = Assert.Throws<TomlException>(() => Parse(NestedArrays(TomlParser.MaxNestingDepth)));
+
+        Assert.Equal(1, error.Line);
+        Assert.Equal(TomlParser.MaxNestingDepth + 4, error.Column);
+        Assert.False(string.IsNullOrWhiteSpace(error.Snippet));
+        Assert.Contains("maximum nesting depth", error.Message);
+        Assert.DoesNotContain("MaxDepth", error.Message);
+    }
+
+    private static string NestedArrays(int depth) =>
+        "x = " + new string('[', depth) + new string(']', depth) + "\n";
 }
