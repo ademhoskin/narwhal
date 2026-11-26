@@ -59,10 +59,42 @@ public class CloudArtifactCanonicalizationTests
     }
 
     [Theory]
+    [InlineData("")]
+    [InlineData("\uFEFF{}")]
+    [InlineData("""{"a":1/*comment*/}""")]
+    [InlineData("""{"a":1,}""")]
+    [InlineData("""{"a":+1}""")]
+    [InlineData("""{"a":01}""")]
+    public void RejectsInvalidJsonSyntax(string json)
+    {
+        var error = Assert.Throws<CloudArtifactException>(() => CloudArtifactTestData.Canonicalize(json));
+        Assert.Equal(CloudArtifactErrorCodes.JsonInvalid, error.Code);
+    }
+
+    [Fact]
+    public void RejectsJsonNestedDeeperThanTheLimit()
+    {
+        var json = new string('[', 65) + new string(']', 65);
+        var error = Assert.Throws<CloudArtifactException>(() => CloudArtifactTestData.Canonicalize(json));
+        Assert.Equal(CloudArtifactErrorCodes.JsonInvalid, error.Code);
+    }
+
+    [Theory]
+    [InlineData("""{"a":9223372036854775807}""", """{"a":9223372036854775807}""")]
+    [InlineData("""{"a":-9223372036854775808}""", """{"a":-9223372036854775808}""")]
+    [InlineData("""{"a":-0}""", """{"a":0}""")]
+    public void AcceptsIntegerBoundaries(string json, string expected)
+    {
+        Assert.Equal(expected, Canonical(json));
+    }
+
+    [Theory]
     [InlineData("""{"a":1.0}""")]
     [InlineData("""{"a":1e2}""")]
+    [InlineData("""{"a":1E2}""")]
     [InlineData("""{"a":-0.5}""")]
     [InlineData("""{"a":9223372036854775808}""")]
+    [InlineData("""{"a":-9223372036854775809}""")]
     public void RejectsNonIntegerNumbers(string json)
     {
         var error = Assert.Throws<CloudArtifactException>(() => CloudArtifactTestData.Canonicalize(json));

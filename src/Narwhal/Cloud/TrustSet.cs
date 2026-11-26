@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Narwhal.Cloud;
 
 /// <summary>The effective trust set, initialized once from boot pins and replaced by signed rotations.</summary>
@@ -19,26 +21,31 @@ public sealed class TrustSet
     /// <exception cref="CloudArtifactException">The set is malformed, empty, duplicated, or has a mismatched key ID.</exception>
     public static TrustSet Parse(ReadOnlySpan<byte> utf8)
     {
-        JsonValue root;
+        JsonDocument document;
+        JsonElement root;
         try
         {
-            root = JsonAstParser.Parse(utf8);
+            document = StrictJson.Parse(utf8);
+            root = document.RootElement;
         }
         catch (CloudArtifactException)
         {
             throw Invalid("trust set is not strict JSON");
         }
 
-        var array = root as JsonArray ?? throw Invalid("trust set must be a JSON array");
-        if (array.Items.Count == 0)
+        using var ownedDocument = document;
+
+        if (root.ValueKind != JsonValueKind.Array)
+            throw Invalid("trust set must be a JSON array");
+        if (root.GetArrayLength() == 0)
             throw Invalid("trust set must contain at least one key");
 
-        var keys = new List<TrustedKey>(array.Items.Count);
+        var keys = new List<TrustedKey>(root.GetArrayLength());
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        for (var i = 0; i < array.Items.Count; i++)
+        for (var i = 0; i < root.GetArrayLength(); i++)
         {
             var key = TrustedKeyParser.Parse(
-                array.Items[i],
+                root[i],
                 $"trust[{i}]",
                 CloudArtifactErrorCodes.TrustSetInvalid);
             if (!seen.Add(key.KeyId))
@@ -93,7 +100,7 @@ public sealed class TrustSet
 
 internal static class TrustedKeyParser
 {
-    public static TrustedKey Parse(JsonValue value, string path, string code)
+    public static TrustedKey Parse(JsonElement value, string path, string code)
     {
         var obj = JsonShape.Object(value, path, code);
         JsonShape.Members(obj, path, code, "key_id", "public_key", "not_after");

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Narwhal.Cloud;
 
 /// <summary>The signature layer payload: a detached Ed25519 multi-signature envelope.</summary>
@@ -12,15 +14,19 @@ public sealed class SignatureEnvelope
     /// <summary>Parses the envelope strictly, rejecting unknown fields and malformed signatures.</summary>
     public static SignatureEnvelope Parse(ReadOnlySpan<byte> utf8)
     {
-        JsonValue root;
+        JsonDocument document;
+        JsonElement root;
         try
         {
-            root = JsonAstParser.Parse(utf8);
+            document = StrictJson.Parse(utf8);
+            root = document.RootElement;
         }
         catch (CloudArtifactException)
         {
             throw Invalid("signature envelope is not strict JSON");
         }
+
+        using var ownedDocument = document;
 
         const string code = CloudArtifactErrorCodes.SignatureInvalid;
         var obj = JsonShape.Object(root, "signature", code);
@@ -41,14 +47,14 @@ public sealed class SignatureEnvelope
             JsonShape.Required(obj, "signature", "signatures", code),
             "signature.signatures",
             code);
-        if (signatures.Items.Count == 0)
+        if (signatures.GetArrayLength() == 0)
             throw Invalid("signature envelope has no signatures");
 
-        var parsed = new List<EnvelopeSignature>(signatures.Items.Count);
-        for (var i = 0; i < signatures.Items.Count; i++)
+        var parsed = new List<EnvelopeSignature>(signatures.GetArrayLength());
+        for (var i = 0; i < signatures.GetArrayLength(); i++)
         {
             var path = $"signature.signatures[{i}]";
-            var entry = JsonShape.Object(signatures.Items[i], path, code);
+            var entry = JsonShape.Object(signatures[i], path, code);
             JsonShape.Members(entry, path, code, "alg", "key_id", "sig");
 
             var algorithm = JsonShape.String(JsonShape.Required(entry, path, "alg", code), $"{path}.alg", code);

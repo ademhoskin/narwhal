@@ -1,9 +1,11 @@
+using System.Text.Json;
+
 namespace Narwhal.Cloud;
 
 /// <summary>Strict schema validation for the <c>narwhal.desired/v1</c> payload.</summary>
 internal static class DesiredSchema
 {
-    public static DesiredDocument Validate(JsonValue root)
+    public static DesiredDocument Validate(JsonElement root)
     {
         var obj = JsonShape.Object(root, "payload");
 
@@ -59,11 +61,11 @@ internal static class DesiredSchema
         if (JsonShape.Optional(obj, "trust", out var trustValue))
         {
             var trustArray = JsonShape.Array(trustValue, "payload.trust");
-            if (trustArray.Items.Count == 0)
+            if (trustArray.GetArrayLength() == 0)
                 throw Invalid("payload.trust", "expected at least one key");
-            var keys = new List<TrustedKey>(trustArray.Items.Count);
-            for (var i = 0; i < trustArray.Items.Count; i++)
-                keys.Add(TrustedKeyParser.Parse(trustArray.Items[i], $"payload.trust[{i}]", CloudArtifactErrorCodes.SchemaInvalid));
+            var keys = new List<TrustedKey>(trustArray.GetArrayLength());
+            for (var i = 0; i < trustArray.GetArrayLength(); i++)
+                keys.Add(TrustedKeyParser.Parse(trustArray[i], $"payload.trust[{i}]", CloudArtifactErrorCodes.SchemaInvalid));
             trust = keys;
         }
 
@@ -95,7 +97,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static PreviousArtifact ParsePrevious(JsonValue value, string path)
+    private static PreviousArtifact ParsePrevious(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "generation", "digest", "manifest_digest");
@@ -107,7 +109,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static TargetSpec ParseTarget(JsonValue value, string path)
+    private static TargetSpec ParseTarget(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "provider", "region", "arch", "selector", "ingress");
@@ -117,16 +119,16 @@ internal static class DesiredSchema
         var arch = Enum(obj, path, "arch", ["amd64", "arm64"]);
 
         var selectorObject = JsonShape.Object(JsonShape.Required(obj, path, "selector"), $"{path}.selector");
-        if (selectorObject.Members.Count == 0)
+        if (!selectorObject.EnumerateObject().Any())
             throw Invalid($"{path}.selector", "expected at least one selector");
         var selector = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var member in selectorObject.Members)
-            selector.Add(member.Key, JsonShape.NonEmptyString(member.Value, $"{path}.selector.{member.Key}"));
+        foreach (var member in selectorObject.EnumerateObject())
+            selector.Add(member.Name, JsonShape.NonEmptyString(member.Value, $"{path}.selector.{member.Name}"));
 
         var ingressArray = JsonShape.Array(JsonShape.Required(obj, path, "ingress"), $"{path}.ingress");
-        var ingress = new List<IngressRule>(ingressArray.Items.Count);
-        for (var i = 0; i < ingressArray.Items.Count; i++)
-            ingress.Add(ParseIngressRule(ingressArray.Items[i], $"{path}.ingress[{i}]"));
+        var ingress = new List<IngressRule>(ingressArray.GetArrayLength());
+        for (var i = 0; i < ingressArray.GetArrayLength(); i++)
+            ingress.Add(ParseIngressRule(ingressArray[i], $"{path}.ingress[{i}]"));
 
         return new TargetSpec
         {
@@ -138,7 +140,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static IngressRule ParseIngressRule(JsonValue value, string path)
+    private static IngressRule ParseIngressRule(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "protocol", "port", "source");
@@ -147,31 +149,31 @@ internal static class DesiredSchema
         var port = (int)JsonShape.Integer(JsonShape.Required(obj, path, "port"), $"{path}.port", 1, 65535);
 
         var sourceArray = JsonShape.Array(JsonShape.Required(obj, path, "source"), $"{path}.source");
-        if (sourceArray.Items.Count == 0)
+        if (sourceArray.GetArrayLength() == 0)
             throw Invalid($"{path}.source", "expected at least one source");
         var sources = ParseUniqueStrings(sourceArray, $"{path}.source");
 
         return new IngressRule { Protocol = protocol, Port = port, Source = sources };
     }
 
-    private static IReadOnlyDictionary<string, ImageSpec> ParseImages(JsonValue value, string path)
+    private static IReadOnlyDictionary<string, ImageSpec> ParseImages(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
-        if (obj.Members.Count == 0)
+        if (!obj.EnumerateObject().Any())
             throw Invalid(path, "expected at least one image");
 
         var images = new Dictionary<string, ImageSpec>(StringComparer.Ordinal);
-        foreach (var member in obj.Members)
+        foreach (var member in obj.EnumerateObject())
         {
-            if (!CloudPatterns.Digest().IsMatch(member.Key))
-                throw Invalid($"{path}.{member.Key}", "image keys must be sha256 digests");
-            images.Add(member.Key, ParseImage(member.Value, $"{path}.{member.Key}"));
+            if (!CloudPatterns.Digest().IsMatch(member.Name))
+                throw Invalid($"{path}.{member.Name}", "image keys must be sha256 digests");
+            images.Add(member.Name, ParseImage(member.Value, $"{path}.{member.Name}"));
         }
 
         return images;
     }
 
-    private static ImageSpec ParseImage(JsonValue value, string path)
+    private static ImageSpec ParseImage(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "repository", "platform", "size");
@@ -188,20 +190,20 @@ internal static class DesiredSchema
         };
     }
 
-    private static IReadOnlyDictionary<string, ServiceSpec> ParseServices(JsonValue value, string path)
+    private static IReadOnlyDictionary<string, ServiceSpec> ParseServices(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
-        if (obj.Members.Count == 0)
+        if (!obj.EnumerateObject().Any())
             throw Invalid(path, "expected at least one service");
 
         var services = new Dictionary<string, ServiceSpec>(StringComparer.Ordinal);
-        foreach (var member in obj.Members)
-            services.Add(member.Key, ParseService(member.Value, $"{path}.{member.Key}"));
+        foreach (var member in obj.EnumerateObject())
+            services.Add(member.Name, ParseService(member.Value, $"{path}.{member.Name}"));
 
         return services;
     }
 
-    private static ServiceSpec ParseService(JsonValue value, string path)
+    private static ServiceSpec ParseService(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(
@@ -237,8 +239,8 @@ internal static class DesiredSchema
         {
             var envObject = JsonShape.Object(envValue, $"{path}.env");
             var map = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var member in envObject.Members)
-                map.Add(member.Key, JsonShape.String(member.Value, $"{path}.env.{member.Key}"));
+            foreach (var member in envObject.EnumerateObject())
+                map.Add(member.Name, JsonShape.String(member.Value, $"{path}.env.{member.Name}"));
             env = map;
         }
 
@@ -247,8 +249,8 @@ internal static class DesiredSchema
         {
             var secretsObject = JsonShape.Object(secretsValue, $"{path}.secrets");
             var map = new Dictionary<string, SecretRef>(StringComparer.Ordinal);
-            foreach (var member in secretsObject.Members)
-                map.Add(member.Key, ParseSecretRef(member.Value, $"{path}.secrets.{member.Key}"));
+            foreach (var member in secretsObject.EnumerateObject())
+                map.Add(member.Name, ParseSecretRef(member.Value, $"{path}.secrets.{member.Name}"));
             secrets = map;
         }
 
@@ -304,7 +306,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static SecretRef ParseSecretRef(JsonValue value, string path)
+    private static SecretRef ParseSecretRef(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "source", "id", "version", "key");
@@ -332,7 +334,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static HealthSpec ParseHealth(JsonValue value, string path)
+    private static HealthSpec ParseHealth(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "command", "interval", "timeout", "retries", "start_period");
@@ -351,7 +353,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static DeploySpec ParseDeploy(JsonValue value, string path)
+    private static DeploySpec ParseDeploy(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "network", "wait_seconds");
@@ -367,7 +369,7 @@ internal static class DesiredSchema
         return new DeploySpec { Network = network, WaitSeconds = waitSeconds };
     }
 
-    private static AgentSpec ParseAgent(JsonValue value, string path)
+    private static AgentSpec ParseAgent(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "version", "repository", "digest", "binary_sha256");
@@ -381,7 +383,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static string Digest(JsonValue value, string path)
+    private static string Digest(JsonElement value, string path)
     {
         var text = JsonShape.String(value, path);
         if (!CloudPatterns.Digest().IsMatch(text))
@@ -389,7 +391,7 @@ internal static class DesiredSchema
         return text;
     }
 
-    private static string Hex64(JsonValue value, string path)
+    private static string Hex64(JsonElement value, string path)
     {
         var text = JsonShape.String(value, path);
         if (!CloudPatterns.Hex64().IsMatch(text))
@@ -397,7 +399,7 @@ internal static class DesiredSchema
         return text;
     }
 
-    private static string Enum(JsonObject obj, string path, string name, string[] allowed)
+    private static string Enum(JsonElement obj, string path, string name, string[] allowed)
     {
         var text = JsonShape.String(JsonShape.Required(obj, path, name), $"{path}.{name}");
         if (System.Array.IndexOf(allowed, text) < 0)
@@ -405,7 +407,7 @@ internal static class DesiredSchema
         return text;
     }
 
-    private static string Enum(JsonValue value, string path, string[] allowed)
+    private static string Enum(JsonElement value, string path, string[] allowed)
     {
         var text = JsonShape.String(value, path);
         if (System.Array.IndexOf(allowed, text) < 0)
@@ -413,7 +415,7 @@ internal static class DesiredSchema
         return text;
     }
 
-    private static string ParseTimestamp(JsonValue value, string path)
+    private static string ParseTimestamp(JsonElement value, string path)
     {
         var text = JsonShape.String(value, path);
         if (!CloudEncoding.TryParseUtcTimestamp(text, out _))
@@ -421,15 +423,15 @@ internal static class DesiredSchema
         return text;
     }
 
-    private static IReadOnlyList<string> Strings(JsonArray array, string path)
+    private static IReadOnlyList<string> Strings(JsonElement array, string path)
     {
-        var items = new List<string>(array.Items.Count);
-        for (var i = 0; i < array.Items.Count; i++)
-            items.Add(JsonShape.String(array.Items[i], $"{path}[{i}]"));
+        var items = new List<string>(array.GetArrayLength());
+        for (var i = 0; i < array.GetArrayLength(); i++)
+            items.Add(JsonShape.String(array[i], $"{path}[{i}]"));
         return items;
     }
 
-    private static IReadOnlyList<string> ParseUniqueStrings(JsonArray array, string path)
+    private static IReadOnlyList<string> ParseUniqueStrings(JsonElement array, string path)
     {
         var items = Strings(array, path);
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -443,22 +445,22 @@ internal static class DesiredSchema
     }
 
     private static IReadOnlyList<string> ArrayOrEmpty(
-        JsonObject obj,
+        JsonElement obj,
         string name,
         string path,
-        Func<JsonValue, string, string> read,
+        Func<JsonElement, string, string> read,
         bool unique = false)
     {
         if (!JsonShape.Optional(obj, name, out var value))
             return [];
 
         var array = JsonShape.Array(value, $"{path}.{name}");
-        var items = new List<string>(array.Items.Count);
+        var items = new List<string>(array.GetArrayLength());
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        for (var i = 0; i < array.Items.Count; i++)
+        for (var i = 0; i < array.GetArrayLength(); i++)
         {
             var itemPath = $"{path}.{name}[{i}]";
-            var item = read(array.Items[i], itemPath);
+            var item = read(array[i], itemPath);
             if (unique && !seen.Add(item))
                 throw Invalid(itemPath, "duplicate array item");
             items.Add(item);

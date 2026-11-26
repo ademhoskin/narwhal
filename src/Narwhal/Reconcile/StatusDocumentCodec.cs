@@ -65,10 +65,12 @@ public static class StatusDocumentCodec
     /// <exception cref="CloudArtifactException">The document is not a valid canonical status document.</exception>
     public static ReconcileStatusDocument Decode(ReadOnlySpan<byte> utf8)
     {
-        JsonValue root;
+        JsonDocument document;
+        JsonElement root;
         try
         {
-            root = JsonAstParser.Parse(utf8);
+            document = StrictJson.Parse(utf8);
+            root = document.RootElement;
         }
         catch (CloudArtifactException)
         {
@@ -76,6 +78,8 @@ public static class StatusDocumentCodec
                 CloudArtifactErrorCodes.JsonInvalid,
                 "status payload is not strict JSON");
         }
+
+        using var ownedDocument = document;
 
         if (!CanonicalJsonWriter.Write(root).AsSpan().SequenceEqual(utf8))
             throw new CloudArtifactException(CloudArtifactErrorCodes.NonCanonical, "status payload bytes are not canonical");
@@ -301,7 +305,7 @@ public static class StatusDocumentCodec
             writer.WriteNumber(name, value.Value);
     }
 
-    private static StatusTarget ParseTarget(JsonValue value, string path)
+    private static StatusTarget ParseTarget(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "provider", "region", "arch", "selector", "ingress");
@@ -316,13 +320,13 @@ public static class StatusDocumentCodec
 
         var selectorObject = JsonShape.Object(JsonShape.Required(obj, path, "selector"), $"{path}.selector");
         var selector = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var member in selectorObject.Members)
-            selector.Add(member.Key, JsonShape.NonEmptyString(member.Value, $"{path}.selector.{member.Key}"));
+        foreach (var member in selectorObject.EnumerateObject())
+            selector.Add(member.Name, JsonShape.NonEmptyString(member.Value, $"{path}.selector.{member.Name}"));
 
         var ingressArray = JsonShape.Array(JsonShape.Required(obj, path, "ingress"), $"{path}.ingress");
-        var ingress = new List<StatusIngress>(ingressArray.Items.Count);
-        for (var i = 0; i < ingressArray.Items.Count; i++)
-            ingress.Add(ParseIngress(ingressArray.Items[i], $"{path}.ingress[{i}]"));
+        var ingress = new List<StatusIngress>(ingressArray.GetArrayLength());
+        for (var i = 0; i < ingressArray.GetArrayLength(); i++)
+            ingress.Add(ParseIngress(ingressArray[i], $"{path}.ingress[{i}]"));
 
         return new StatusTarget
         {
@@ -334,7 +338,7 @@ public static class StatusDocumentCodec
         };
     }
 
-    private static StatusIngress ParseIngress(JsonValue value, string path)
+    private static StatusIngress ParseIngress(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "protocol", "port", "source");
@@ -344,14 +348,14 @@ public static class StatusDocumentCodec
             throw Invalid($"{path}.protocol", "unknown protocol");
         var port = JsonShape.Integer(JsonShape.Required(obj, path, "port"), $"{path}.port", 1, 65535);
         var sourceArray = JsonShape.Array(JsonShape.Required(obj, path, "source"), $"{path}.source");
-        var sources = new List<string>(sourceArray.Items.Count);
-        foreach (var item in sourceArray.Items)
+        var sources = new List<string>(sourceArray.GetArrayLength());
+        foreach (var item in sourceArray.EnumerateArray())
             sources.Add(JsonShape.NonEmptyString(item, $"{path}.source"));
 
         return new StatusIngress { Protocol = protocol, Port = (int)port, Source = sources };
     }
 
-    private static StatusHost ParseHost(JsonValue value, string path)
+    private static StatusHost ParseHost(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(
@@ -377,7 +381,7 @@ public static class StatusDocumentCodec
         };
     }
 
-    private static StatusObserved ParseObserved(JsonValue value, string path)
+    private static StatusObserved ParseObserved(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "generation", "manifest_digest", "payload_digest", "key_id");
@@ -393,7 +397,7 @@ public static class StatusDocumentCodec
         };
     }
 
-    private static StatusActive ParseActive(JsonValue value, string path)
+    private static StatusActive ParseActive(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "generation", "payload_digest", "state");
@@ -408,7 +412,7 @@ public static class StatusDocumentCodec
         };
     }
 
-    private static StatusAttempts ParseAttempts(JsonValue value, string path)
+    private static StatusAttempts ParseAttempts(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "generation", "count", "last_at");
@@ -420,16 +424,16 @@ public static class StatusDocumentCodec
         };
     }
 
-    private static Dictionary<string, StatusService> ParseServices(JsonValue value, string path)
+    private static Dictionary<string, StatusService> ParseServices(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         var services = new Dictionary<string, StatusService>(StringComparer.Ordinal);
-        foreach (var member in obj.Members)
+        foreach (var member in obj.EnumerateObject())
         {
-            var servicePath = $"{path}.{member.Key}";
+            var servicePath = $"{path}.{member.Name}";
             var entry = JsonShape.Object(member.Value, servicePath);
             JsonShape.Members(entry, servicePath, CloudArtifactErrorCodes.SchemaInvalid, "container", "image_digest", "state", "health", "restarts", "started_at");
-            services.Add(member.Key, new StatusService
+            services.Add(member.Name, new StatusService
             {
                 Container = JsonShape.NonEmptyString(JsonShape.Required(entry, servicePath, "container"), $"{servicePath}.container"),
                 ImageDigest = RequiredDigest(entry, servicePath, "image_digest"),
@@ -443,7 +447,7 @@ public static class StatusDocumentCodec
         return services;
     }
 
-    private static LastErrorInfo ParseLastError(JsonValue value, string path)
+    private static LastErrorInfo ParseLastError(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         JsonShape.Members(obj, path, CloudArtifactErrorCodes.SchemaInvalid, "code", "message", "service", "at");
@@ -459,17 +463,17 @@ public static class StatusDocumentCodec
         };
     }
 
-    private static List<StatusLogLine> ParseLogsTail(JsonValue value, string path)
+    private static List<StatusLogLine> ParseLogsTail(JsonElement value, string path)
     {
         var array = JsonShape.Array(value, path);
-        if (array.Items.Count > 200)
+        if (array.GetArrayLength() > 200)
             throw Invalid(path, "expected at most 200 lines");
-        var lines = new List<StatusLogLine>(array.Items.Count);
+        var lines = new List<StatusLogLine>(array.GetArrayLength());
         var bytes = 0;
-        for (var i = 0; i < array.Items.Count; i++)
+        for (var i = 0; i < array.GetArrayLength(); i++)
         {
             var itemPath = $"{path}[{i}]";
-            var obj = JsonShape.Object(array.Items[i], itemPath);
+            var obj = JsonShape.Object(array[i], itemPath);
             JsonShape.Members(obj, itemPath, CloudArtifactErrorCodes.SchemaInvalid, "service", "at", "line");
             var line = JsonShape.String(JsonShape.Required(obj, itemPath, "line"), $"{itemPath}.line");
             bytes += Encoding.UTF8.GetByteCount(line);
@@ -486,7 +490,7 @@ public static class StatusDocumentCodec
         return lines;
     }
 
-    private static string RequiredDigest(JsonObject obj, string path, string name)
+    private static string RequiredDigest(JsonElement obj, string path, string name)
     {
         var value = JsonShape.String(JsonShape.Required(obj, path, name), $"{path}.{name}");
         if (!CloudPatterns.Digest().IsMatch(value))
@@ -494,7 +498,7 @@ public static class StatusDocumentCodec
         return value;
     }
 
-    private static string? OptionalDigest(JsonObject obj, string path, string name)
+    private static string? OptionalDigest(JsonElement obj, string path, string name)
     {
         var value = NullableString(obj, path, name);
         if (value is not null && !CloudPatterns.Digest().IsMatch(value))
@@ -502,21 +506,21 @@ public static class StatusDocumentCodec
         return value;
     }
 
-    private static string? NullableString(JsonObject obj, string path, string name)
+    private static string? NullableString(JsonElement obj, string path, string name)
     {
         if (!JsonShape.Optional(obj, name, out var value) || JsonShape.IsNull(value))
             return null;
         return JsonShape.String(value, $"{path}.{name}");
     }
 
-    private static string? OptionalTimestamp(JsonObject obj, string path, string name)
+    private static string? OptionalTimestamp(JsonElement obj, string path, string name)
     {
         if (!JsonShape.Optional(obj, name, out var value) || JsonShape.IsNull(value))
             return null;
         return Timestamp(value, $"{path}.{name}");
     }
 
-    private static string Timestamp(JsonValue value, string path)
+    private static string Timestamp(JsonElement value, string path)
     {
         var text = JsonShape.String(value, path);
         if (!CloudEncoding.TryParseUtcTimestamp(text, out _))

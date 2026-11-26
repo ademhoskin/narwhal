@@ -251,6 +251,8 @@ public class CloudArtifactVerifierTests
     [InlineData("""{"schema":"narwhal.signature/v1","payload_digest":"%DIGEST%","signatures":[{"alg":"ed25519","key_id":"%KEY%","sig":"AAAA"}]}""")]
     [InlineData("""{"schema":"narwhal.signature/v2","payload_digest":"%DIGEST%","signatures":[{"alg":"ed25519","key_id":"%KEY%","sig":"%SIG%"}]}""")]
     [InlineData("""{"schema":"narwhal.signature/v1","payload_digest":"%DIGEST%","signatures":[{"alg":"ed25519","key_id":"%KEY%","sig":"%SIG%"}]} trailing""")]
+    [InlineData("""{"schema":"narwhal.signature/v1","schema":"narwhal.signature/v1","payload_digest":"%DIGEST%","signatures":[{"alg":"ed25519","key_id":"%KEY%","sig":"%SIG%"}]}""")]
+    [InlineData("""{"schema":"narwhal.signature/v1","payload_digest":"%DIGEST%","signatures":[{"alg":"ed25519","key_id":"%KEY%","key_id":"%KEY%","sig":"%SIG%"}]}""")]
     public void RejectsMalformedSignatureEnvelopes(string template)
     {
         var payload = CloudArtifactTestData.Canonicalize(CloudArtifactTestData.PayloadJson());

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 
 namespace Narwhal.Cloud;
 
@@ -93,15 +94,19 @@ public static class DesiredArtifactVerifier
         if (verifyingKeyIds.Count == 0)
             throw new CloudArtifactException(CloudArtifactErrorCodes.SignatureInvalid, "no signature verified");
 
-        JsonValue root;
+        JsonDocument jsonDocument;
+        JsonElement root;
         try
         {
-            root = JsonAstParser.Parse(payload);
+            jsonDocument = StrictJson.Parse(payload);
+            root = jsonDocument.RootElement;
         }
         catch (CloudArtifactException exception)
         {
             throw new CloudArtifactException(exception.Code, "payload is not strict JSON");
         }
+
+        using var ownedDocument = jsonDocument;
 
         var canonical = CanonicalJsonWriter.Write(root);
         if (!canonical.AsSpan().SequenceEqual(payload))

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Text;
 using System.Text;
+using System.Text.Json;
 
 namespace Narwhal.Cloud;
 
@@ -9,7 +10,11 @@ public static class CanonicalJson
 {
     /// <summary>Returns the canonical UTF-8 form of a strict JSON document.</summary>
     /// <exception cref="CloudArtifactException">The document is malformed, has duplicate keys, or uses non-integer numbers.</exception>
-    public static byte[] Canonicalize(ReadOnlySpan<byte> utf8) => CanonicalJsonWriter.Write(JsonAstParser.Parse(utf8));
+    public static byte[] Canonicalize(ReadOnlySpan<byte> utf8)
+    {
+        using var document = StrictJson.Parse(utf8);
+        return CanonicalJsonWriter.Write(document.RootElement);
+    }
 
     /// <summary>True when the bytes are already the canonical form of a strict JSON document.</summary>
     public static bool IsCanonical(ReadOnlySpan<byte> utf8)
@@ -27,58 +32,66 @@ public static class CanonicalJson
 
 internal static class CanonicalJsonWriter
 {
-    public static byte[] Write(JsonValue value)
+    public static byte[] Write(JsonElement value)
     {
         var buffer = new ArrayBufferWriter<byte>();
         WriteValue(buffer, value);
         return buffer.WrittenSpan.ToArray();
     }
 
-    private static void WriteValue(ArrayBufferWriter<byte> buffer, JsonValue value)
+    private static void WriteValue(ArrayBufferWriter<byte> buffer, JsonElement value)
     {
-        switch (value)
+        switch (value.ValueKind)
         {
-            case JsonNull:
+            case JsonValueKind.Null:
                 WriteAscii(buffer, "null");
                 break;
-            case JsonBoolean boolean:
-                WriteAscii(buffer, boolean.Value ? "true" : "false");
+            case JsonValueKind.True:
+                WriteAscii(buffer, "true");
                 break;
-            case JsonNumber number:
-                WriteNumber(buffer, number.Value);
+            case JsonValueKind.False:
+                WriteAscii(buffer, "false");
                 break;
-            case JsonString text:
-                WriteString(buffer, text.Value);
+            case JsonValueKind.Number:
+                if (!value.TryGetInt64(out var number))
+                    throw new CloudArtifactException(
+                        CloudArtifactErrorCodes.JsonInvalid,
+                        "only canonical integers are accepted");
+                WriteNumber(buffer, number);
                 break;
-            case JsonArray array:
+            case JsonValueKind.String:
+                WriteString(buffer, value.GetString()!);
+                break;
+            case JsonValueKind.Array:
                 buffer.GetSpan(1)[0] = (byte)'[';
                 buffer.Advance(1);
-                for (var i = 0; i < array.Items.Count; i++)
+                var index = 0;
+                foreach (var item in value.EnumerateArray())
                 {
-                    if (i > 0)
+                    if (index++ > 0)
                     {
                         buffer.GetSpan(1)[0] = (byte)',';
                         buffer.Advance(1);
                     }
 
-                    WriteValue(buffer, array.Items[i]);
+                    WriteValue(buffer, item);
                 }
 
                 buffer.GetSpan(1)[0] = (byte)']';
                 buffer.Advance(1);
                 break;
-            case JsonObject obj:
-                WriteObject(buffer, obj);
+            case JsonValueKind.Object:
+                WriteObject(buffer, value);
                 break;
             default:
                 throw new InvalidOperationException("unknown JSON value");
         }
     }
 
-    private static void WriteObject(ArrayBufferWriter<byte> buffer, JsonObject obj)
+    private static void WriteObject(ArrayBufferWriter<byte> buffer, JsonElement value)
     {
-        var members = obj.Members.ToArray();
-        Array.Sort(members, static (left, right) => string.CompareOrdinal(left.Key, right.Key));
+        var members = value.EnumerateObject().ToArray();
+        Array.Sort(members, static (left, right) => string.CompareOrdinal(left.Name, right.Name));
 
         buffer.GetSpan(1)[0] = (byte)'{';
         buffer.Advance(1);
@@ -90,7 +103,7 @@ internal static class CanonicalJsonWriter
                 buffer.Advance(1);
             }
 
-            WriteString(buffer, members[i].Key);
+            WriteString(buffer, members[i].Name);
             buffer.GetSpan(1)[0] = (byte)':';
             buffer.Advance(1);
             WriteValue(buffer, members[i].Value);

@@ -57,6 +57,25 @@ public class CloudArtifactTrustTests
     }
 
     [Fact]
+    public void RejectsDuplicateJsonObjectKeys()
+    {
+        var json = "[{\"key_id\":\"" + CloudArtifactTestData.KeyId1 +
+            "\",\"public_key\":\"" + CloudArtifactTestData.PublicKey1Base64 +
+            "\",\"public_key\":\"" + CloudArtifactTestData.PublicKey1Base64 + "\"}]";
+        var bytes = Encoding.UTF8.GetBytes(json);
+
+        var strict = Assert.Throws<CloudArtifactException>(() =>
+        {
+            using var document = StrictJson.Parse(bytes);
+        });
+        Assert.Equal(CloudArtifactErrorCodes.JsonInvalid, strict.Code);
+        Assert.Contains("duplicate JSON object key", strict.Message, StringComparison.Ordinal);
+
+        var error = Assert.Throws<CloudArtifactException>(() => TrustSet.Parse(bytes));
+        Assert.Equal(CloudArtifactErrorCodes.TrustSetInvalid, error.Code);
+    }
+
+    [Fact]
     public void RejectsDuplicateKeyIds()
     {
         var entry = CloudArtifactTestData.DefaultTrustEntry(CloudArtifactTestData.Seed1);
