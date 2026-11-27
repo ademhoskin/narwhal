@@ -195,25 +195,25 @@ public class PropertyTests
         switch (random.Next(5))
         {
             case 0:
-            {
-                var value = random.Next(0, 1_000_000);
-                return (value.ToString(CultureInfo.InvariantCulture), value);
-            }
+                {
+                    var value = random.Next(0, 1_000_000);
+                    return (value.ToString(CultureInfo.InvariantCulture), value);
+                }
             case 1:
-            {
-                var value = -random.Next(0, 1_000_000);
-                return (value.ToString(CultureInfo.InvariantCulture), value);
-            }
+                {
+                    var value = -random.Next(0, 1_000_000);
+                    return (value.ToString(CultureInfo.InvariantCulture), value);
+                }
             case 2:
-            {
-                var value = random.Next(0, 0xFFFF);
-                return ($"0x{value:x}", value);
-            }
+                {
+                    var value = random.Next(0, 0xFFFF);
+                    return ($"0x{value:x}", value);
+                }
             case 3:
-            {
-                var value = random.Next(0, 0xFFF);
-                return ($"0o{Convert.ToString(value, 8)}", value);
-            }
+                {
+                    var value = random.Next(0, 0xFFF);
+                    return ($"0o{Convert.ToString(value, 8)}", value);
+                }
             default:
                 return RandomUnderscoredInteger(random);
         }

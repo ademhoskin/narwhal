@@ -80,7 +80,7 @@ public sealed class StatusStore
     private static int Count(string directory) =>
         Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.json").Count() : 0;
 
-    private void WriteBounded(string directory, StatusSnapshot snapshot)
+    private static void WriteBounded(string directory, StatusSnapshot snapshot)
     {
         var name = string.Format(
             CultureInfo.InvariantCulture,

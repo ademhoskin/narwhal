@@ -1086,7 +1086,7 @@ public sealed class AgentUpgrader
     private static string Sha256Hex(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexStringLower(SHA256.HashData(bytes));
 
-    private string Timestamp(DateTimeOffset value) =>
+    private static string Timestamp(DateTimeOffset value) =>
         value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
     private static DateTimeOffset? ParseTimestamp(string value) =>

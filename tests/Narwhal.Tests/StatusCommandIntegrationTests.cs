@@ -8,7 +8,7 @@ using Xunit;
 
 namespace Narwhal.Tests;
 
-[Collection(MultiPlatformIntegrationTests.ProcessCollection.Name)]
+[Collection(MultiPlatformIntegrationTests.CliProcessSerial.Name)]
 public class StatusCommandIntegrationTests
 {
     private const string Repository = "shop/state/aws-us-east-1-amd64-1a2b3c4d/status";

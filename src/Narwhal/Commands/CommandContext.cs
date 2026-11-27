@@ -21,7 +21,7 @@ public sealed class CommandContext
 
     public string Network => Manifest.Deploy.Network ?? PodmanClient.DefaultNetwork(Manifest.Name);
 
-    public string HostSystem => NixPlatform.ContainerSystem;
+    public static string HostSystem => NixPlatform.ContainerSystem;
 
     public static CommandContext Create(CliOptions options)
     {

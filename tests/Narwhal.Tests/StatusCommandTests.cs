@@ -1,5 +1,4 @@
 using Narwhal.Cli;
-using Narwhal.Cloud;
 using Narwhal.Reconcile;
 using Xunit;
 

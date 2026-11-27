@@ -12,7 +12,7 @@ namespace Narwhal.Tests;
 /// docker-archive tarballs and a fake podman keeps local tags and manifest
 /// lists, so every orchestration path runs without emulation or a registry.
 /// </summary>
-[Collection(ProcessCollection.Name)]
+[Collection(CliProcessSerial.Name)]
 public class MultiPlatformIntegrationTests
 {
     [Fact]
@@ -78,7 +78,7 @@ public class MultiPlatformIntegrationTests
         // its own name and pushes every image in it.
         var push = box.Run("push");
         Assert.True(push.Code == 0, push.Err + push.Out);
-        var index = box.IndexName("example/web:latest");
+        var index = Sandbox.IndexName("example/web:latest");
         var podman = File.ReadAllText(box.PodmanLog);
         Assert.Contains($"manifest rm {index}", podman);
         Assert.Contains($"manifest create --amend {index}", podman);
@@ -214,7 +214,7 @@ public class MultiPlatformIntegrationTests
         using var box = new Sandbox([Foreign(), Host()]);
         Assert.Equal(0, box.Run("build").Code);
 
-        var index = box.IndexName("example/web:latest");
+        var index = Sandbox.IndexName("example/web:latest");
         box.SeedManifest(index, "sha256:deadbeef amd64 linux");
 
         // Given a leftover index with a stale platform, push starts from empty.
@@ -253,7 +253,7 @@ public class MultiPlatformIntegrationTests
 
         var push = box.Run("push");
         Assert.True(push.Code == 0, push.Err + push.Out);
-        var manifest = box.PushedManifestEntries(box.IndexName("example/web:latest"));
+        var manifest = box.PushedManifestEntries(Sandbox.IndexName("example/web:latest"));
         Assert.Equal(2, manifest.Count);
     }
 
@@ -439,7 +439,7 @@ public class MultiPlatformIntegrationTests
     private sealed record Locked(string Name, string ImageId);
 
     [CollectionDefinition(Name, DisableParallelization = true)]
-    public sealed class ProcessCollection
+    public sealed class CliProcessSerial
     {
         public const string Name = "cli-process";
     }
@@ -571,7 +571,7 @@ public class MultiPlatformIntegrationTests
             return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
         }
 
-        public string IndexName(string reference)
+        public static string IndexName(string reference)
         {
             var hash = Convert.ToHexStringLower(
                 SHA256.HashData(Encoding.UTF8.GetBytes(reference)))[..12];

@@ -20,7 +20,7 @@ public sealed class NixClient(ProcessRunner runner, Reporter reporter)
     private static readonly string[] FlakeFlags =
         ["--extra-experimental-features", "nix-command flakes"];
 
-    public string Executable => Environment.GetEnvironmentVariable("NARWHAL_NIX") ?? "nix";
+    public static string Executable => Environment.GetEnvironmentVariable("NARWHAL_NIX") ?? "nix";
 
     public async Task<BuiltImage> BuildImageAsync(Manifest manifest, ServiceSpec service, string system,
         CancellationToken cancellationToken, bool rebuild = false)

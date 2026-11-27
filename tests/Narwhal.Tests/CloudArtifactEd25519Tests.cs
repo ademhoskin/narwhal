@@ -96,8 +96,8 @@ public class CloudArtifactEd25519Tests
         var publicKey = Ed25519.PublicKeyFromSeed(seed);
         var signature = Ed25519.Sign(seed, [0x01]);
 
-        Assert.False(Ed25519.Verify(publicKey[..31], [0x01], signature));
-        Assert.False(Ed25519.Verify(publicKey, [0x01], signature[..63]));
+        Assert.False(Ed25519.Verify(publicKey.AsSpan(0, 31), [0x01], signature));
+        Assert.False(Ed25519.Verify(publicKey, [0x01], signature.AsSpan(0, 63)));
         Assert.False(Ed25519.Verify([], [0x01], signature));
     }
 
@@ -148,7 +148,7 @@ public class CloudArtifactEd25519Tests
         signature.CopyTo(oversized, 0);
 
         Assert.False(Ed25519.Verify(publicKey, [0x01], []));
-        Assert.False(Ed25519.Verify(publicKey, [0x01], signature[..63]));
+        Assert.False(Ed25519.Verify(publicKey, [0x01], signature.AsSpan(0, 63)));
         Assert.False(Ed25519.Verify(publicKey, [0x01], oversized));
     }
 
@@ -162,7 +162,7 @@ public class CloudArtifactEd25519Tests
         publicKey.CopyTo(oversized, 0);
 
         Assert.False(Ed25519.Verify([], [0x01], signature));
-        Assert.False(Ed25519.Verify(publicKey[..31], [0x01], signature));
+        Assert.False(Ed25519.Verify(publicKey.AsSpan(0, 31), [0x01], signature));
         Assert.False(Ed25519.Verify(oversized, [0x01], signature));
     }
 

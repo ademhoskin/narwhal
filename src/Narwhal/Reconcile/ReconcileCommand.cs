@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Narwhal.Cli;
-using Narwhal.Podman;
 
 namespace Narwhal.Reconcile;
 

@@ -26,17 +26,24 @@ in
 rec {
   # Build a layered image from a list of store paths (usually packages).
   mkImage =
-    { pkgs
-    , name
-    , tag ? "latest"
-    , contents ? [ ]
-    , config ? { }
-    , maxLayers ? 100
-    , created ? epoch
-    , extraCommands ? ""
+    {
+      pkgs,
+      name,
+      tag ? "latest",
+      contents ? [ ],
+      config ? { },
+      maxLayers ? 100,
+      created ? epoch,
+      extraCommands ? "",
     }:
     pkgs.dockerTools.buildLayeredImage {
-      inherit name tag maxLayers created extraCommands;
+      inherit
+        name
+        tag
+        maxLayers
+        created
+        extraCommands
+        ;
       contents = contents;
       config = {
         # Deterministic defaults; callers can override anything.
@@ -44,48 +51,64 @@ rec {
           "org.opencontainers.image.title" = name;
           "org.opencontainers.image.created" = created;
           "io.narwhal.managed" = "true";
-        } // (config.Labels or { });
-      } // lib.removeAttrs config [ "Labels" ];
+        }
+        // (config.Labels or { });
+      }
+      // lib.removeAttrs config [ "Labels" ];
     };
 
   # Convenience wrapper for the common case: one package is the payload.
   mkPackageImage =
-    { pkgs
-    , name
-    , tag ? "latest"
-    , package
-    , config ? { }
-    , maxLayers ? 100
-    , created ? epoch
+    {
+      pkgs,
+      name,
+      tag ? "latest",
+      package,
+      config ? { },
+      maxLayers ? 100,
+      created ? epoch,
     }:
     mkImage {
-      inherit pkgs name tag config maxLayers created;
+      inherit
+        pkgs
+        name
+        tag
+        config
+        maxLayers
+        created
+        ;
       contents = [ package ];
     };
 
   # A minimal "hello" image, handy for smoke tests and demos.
   mkHelloImage =
-    { pkgs
-    , name ? "narwhal/hello"
-    , tag ? "latest"
-    , message ? "hello from narwhal"
+    {
+      pkgs,
+      name ? "narwhal/hello",
+      tag ? "latest",
+      message ? "hello from narwhal",
     }:
     mkImage {
       inherit pkgs name tag;
       contents = [ pkgs.busybox ];
       config = {
-        Cmd = [ "sh" "-c" "echo ${lib.escapeShellArg message}; exec sleep infinity" ];
+        Cmd = [
+          "sh"
+          "-c"
+          "echo ${lib.escapeShellArg message}; exec sleep infinity"
+        ];
         Labels."io.narwhal.hello" = "true";
       };
     };
 
   # A tiny static HTTP server, used by the bundled example and tests.
   mkHttpImage =
-    { pkgs
-    , name
-    , tag ? "latest"
-    , message ? "hello from narwhal"
-    , port ? 8080
+    {
+      pkgs,
+      name,
+      tag ? "latest",
+      message ? "hello from narwhal",
+      port ? 8080,
     }:
     mkImage {
       inherit pkgs name tag;
@@ -95,7 +118,15 @@ rec {
         printf '%s\n' ${lib.escapeShellArg message} > srv/index.html
       '';
       config = {
-        Cmd = [ "busybox" "httpd" "-f" "-p" (toString port) "-h" "/srv" ];
+        Cmd = [
+          "busybox"
+          "httpd"
+          "-f"
+          "-p"
+          (toString port)
+          "-h"
+          "/srv"
+        ];
         Env = [ "PATH=/bin" ];
         ExposedPorts."${toString port}/tcp" = { };
       };

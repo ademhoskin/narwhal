@@ -5,6 +5,27 @@ on:
   pull_request:
 
 jobs:
+  format:
+    name: format and analyzers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: check analyzers
+        run: |
+          for project in $(git ls-files '*.csproj'); do
+            nix develop --command dotnet build "$project" -t:Rebuild
+          done
+      - name: check formatting
+        run: |
+          for project in $(git ls-files '*.csproj'); do
+            nix develop --command dotnet format "$project" --verify-no-changes
+          done
+          nix develop --command nix fmt -- --check $(git ls-files '*.nix')
+
   test:
     name: unit tests
     runs-on: ubuntu-latest

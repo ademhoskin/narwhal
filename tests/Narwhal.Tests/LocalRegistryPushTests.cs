@@ -9,7 +9,7 @@ namespace Narwhal.Tests;
 /// when podman, curl, or jq is missing, or when the registry:2 image cannot be
 /// pulled (the check needs a loopback registry and network access once).
 /// </summary>
-[Collection(MultiPlatformIntegrationTests.ProcessCollection.Name)]
+[Collection(MultiPlatformIntegrationTests.CliProcessSerial.Name)]
 public class LocalRegistryPushTests
 {
     [OptInRegistryFact]

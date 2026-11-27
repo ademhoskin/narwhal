@@ -154,5 +154,7 @@ public class ArchiveImageEdgeCaseTests : IDisposable
                 // A leftover temp directory must not fail the test run.
             }
         }
+
+        GC.SuppressFinalize(this);
     }
 }

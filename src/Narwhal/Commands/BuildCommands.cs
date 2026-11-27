@@ -66,7 +66,7 @@ public static class BuildCommands
                     }
                 }
 
-                if (!noLoad && system == ctx.HostSystem)
+                if (!noLoad && system == CommandContext.HostSystem)
                 {
                     var loadedId = await ctx.Podman.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
                     if (!SameId(loadedId, imageId))
@@ -135,7 +135,7 @@ public static class BuildCommands
                     var imageId = ArchiveImage.ReadImageId(image.ArtifactPath);
                     var narOk = locked.NarHash.Length > 0 && locked.NarHash == image.NarHash;
 
-                    if (!noLoad && system == ctx.HostSystem)
+                    if (!noLoad && system == CommandContext.HostSystem)
                     {
                         var loadedId = await ctx.Podman.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
                         if (!SameId(loadedId, imageId))
@@ -456,17 +456,17 @@ public static class BuildCommands
     {
         try
         {
-            if (ctx.Manifest.Build.Systems.Contains(ctx.HostSystem, StringComparer.Ordinal))
+            if (ctx.Manifest.Build.Systems.Contains(CommandContext.HostSystem, StringComparer.Ordinal))
             {
-                var host = ctx.Lock.Platform(service.Name, ctx.HostSystem);
+                var host = ctx.Lock.Platform(service.Name, CommandContext.HostSystem);
                 if (host is not null && StorePathExists(host.StorePath))
                 {
-                    var expectedAttr = service.AttrPath(ctx.Manifest, ctx.HostSystem);
-                    var expectedPlatform = NixPlatform.ToOciPlatform(ctx.HostSystem);
+                    var expectedAttr = service.AttrPath(ctx.Manifest, CommandContext.HostSystem);
+                    var expectedPlatform = NixPlatform.ToOciPlatform(CommandContext.HostSystem);
                     if (host.Attr != expectedAttr || host.Platform != expectedPlatform)
                     {
                         ctx.Reporter.Warn(
-                            $"host lock entry for '{service.Name}' ({ctx.HostSystem}) does not match the manifest; restoring the previous tag");
+                            $"host lock entry for '{service.Name}' ({CommandContext.HostSystem}) does not match the manifest; restoring the previous tag");
                     }
                     else
                     {
@@ -492,7 +492,7 @@ public static class BuildCommands
                 return;
             }
 
-            ctx.Reporter.Warn($"'{reference}' is left on the last loaded platform; add {ctx.HostSystem} to build.systems to keep it on the host");
+            ctx.Reporter.Warn($"'{reference}' is left on the last loaded platform; add {CommandContext.HostSystem} to build.systems to keep it on the host");
         }
         catch (OperationCanceledException)
         {
@@ -511,7 +511,7 @@ public static class BuildCommands
     public static async Task<Dictionary<string, string>> EnsureImagesAsync(CommandContext ctx,
         IReadOnlyList<ServiceSpec> services, bool rebuild, CancellationToken cancellationToken)
     {
-        var host = ctx.HostSystem;
+        var host = CommandContext.HostSystem;
         var ids = new Dictionary<string, string>(StringComparer.Ordinal);
         var built = new List<BuildOutcome>();
         var lockChanged = false;
@@ -654,7 +654,7 @@ public static class BuildCommands
                 writer.WriteStartArray("services");
                 foreach (var outcome in built)
                 {
-                    var loaded = outcome.Image.System != ctx.HostSystem ? "foreign"
+                    var loaded = outcome.Image.System != CommandContext.HostSystem ? "foreign"
                         : noLoad ? "skipped"
                         : "podman";
                     writer.WriteStartObject();
@@ -677,7 +677,7 @@ public static class BuildCommands
 
         foreach (var outcome in built)
         {
-            var loaded = outcome.Image.System != ctx.HostSystem ? "(not loaded: foreign platform)"
+            var loaded = outcome.Image.System != CommandContext.HostSystem ? "(not loaded: foreign platform)"
                 : noLoad ? "(not loaded)"
                 : Short(outcome.ImageId);
             reporter.Ok($"{outcome.Service.Name} {outcome.Image.System} {outcome.Image.NarHash} {loaded}");

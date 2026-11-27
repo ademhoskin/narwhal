@@ -9,7 +9,7 @@ namespace Narwhal.Tests;
 /// <c>NARWHAL_E2E_REGISTRY=1</c> to run it; it self-skips when podman, curl, or
 /// jq is missing, when registry:2 cannot be pulled, or on an unsupported host.
 /// </summary>
-[Collection(MultiPlatformIntegrationTests.ProcessCollection.Name)]
+[Collection(MultiPlatformIntegrationTests.CliProcessSerial.Name)]
 public class ConcurrentPushTests
 {
     [OptInConcurrentPushFact]

@@ -5,11 +5,20 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      devSystems = [ "x86_64-linux" "aarch64-linux" ];
+      devSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forDevSystems = f: nixpkgs.lib.genAttrs devSystems (system: f nixpkgs.legacyPackages.${system});
     in
     {
@@ -17,14 +26,16 @@
       #   narwhal.lib.${system}.mkImage { pkgs = ...; ... }
       lib = forAllSystems (pkgs: import ./nix/lib.nix { inherit (pkgs) lib; });
 
-      packages = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system:
+      packages = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (
+        system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
           default = pkgs.callPackage ./nix/package.nix { };
           narwhal = pkgs.callPackage ./nix/package.nix { };
-        });
+        }
+      );
 
       devShells = forDevSystems (pkgs: {
         default = pkgs.mkShell {
@@ -52,6 +63,6 @@
         };
       });
 
-      formatter = forAllSystems (pkgs: pkgs.nixpkgs-fmt);
+      formatter = forAllSystems (pkgs: pkgs.nixfmt);
     };
 }

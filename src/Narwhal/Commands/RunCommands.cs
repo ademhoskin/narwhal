@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Narwhal.Cli;
 using Narwhal.Config;
 using Narwhal.Podman;
@@ -14,10 +13,10 @@ public static class RunCommands
         var reporter = ctx.Reporter;
         var selected = ctx.Select(options.Positionals);
 
-        if (!manifest.Build.Systems.Contains(ctx.HostSystem, StringComparer.Ordinal))
+        if (!manifest.Build.Systems.Contains(CommandContext.HostSystem, StringComparer.Ordinal))
             throw new UsageException(
-                $"the host system '{ctx.HostSystem}' is not in build.systems; configured systems: {string.Join(", ", manifest.Build.Systems)}\n" +
-                $"add '{ctx.HostSystem}' to build.systems to run services on this machine");
+                $"the host system '{CommandContext.HostSystem}' is not in build.systems; configured systems: {string.Join(", ", manifest.Build.Systems)}\n" +
+                $"add '{CommandContext.HostSystem}' to build.systems to run services on this machine");
 
         // Starting a service without its dependencies is almost never what anyone wants.
         var selectedNames = new HashSet<string>(selected.Select(s => s.Name), StringComparer.Ordinal);

@@ -1,11 +1,12 @@
-{ lib
-, buildDotnetModule
-, dotnet-sdk_11
-, clang
-, zlib
-, stdenv
-, oras
-, makeWrapper
+{
+  lib,
+  buildDotnetModule,
+  dotnet-sdk_11,
+  clang,
+  zlib,
+  stdenv,
+  oras,
+  makeWrapper,
 }:
 
 let
@@ -13,8 +14,11 @@ let
   # copying other projects' bin/obj trees.
   src = lib.cleanSourceWith {
     src = ./..;
-    filter = path: type:
-      let base = baseNameOf (toString path); in
+    filter =
+      path: type:
+      let
+        base = baseNameOf (toString path);
+      in
       !(builtins.elem base [
         ".git"
         ".nuget"
@@ -46,7 +50,10 @@ buildDotnetModule {
   inherit runtimeId;
   dotnetFlags = [ "-p:PublishAot=true" ];
 
-  nativeBuildInputs = [ clang makeWrapper ];
+  nativeBuildInputs = [
+    clang
+    makeWrapper
+  ];
   buildInputs = [ zlib ];
 
   dontStrip = false;
@@ -66,6 +73,9 @@ buildDotnetModule {
       --no-restore \
       -p:PublishAot=true \
       -o "$out/lib/narwhal"
+
+    # The CLI ships exactly the binary; a documentation file must never be staged.
+    find "$out/lib/narwhal" -maxdepth 1 -name '*.xml' -delete
 
     # The agent stages the raw binary and needs oras on PATH itself; the
     # wrapper here is for host CLI use.

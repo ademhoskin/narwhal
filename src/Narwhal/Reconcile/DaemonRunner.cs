@@ -20,6 +20,9 @@ public static class DaemonBackoff
     public static bool IsTransportFailure(DaemonCycleResult result) =>
         result.Phase is ReconcilePhases.RegistryUnavailable or ReconcilePhases.AuthFailed;
 
+    /// <param name="result">The outcome of the previous cycle.</param>
+    /// <param name="consecutiveTransportFailures">Transport failures observed so far, used for backoff.</param>
+    /// <param name="pollSeconds">Nominal poll interval when the cycle was not a transport failure.</param>
     /// <param name="jitterSample">A value in [0,1] from the caller's random source.</param>
     public static TimeSpan NextDelay(
         DaemonCycleResult result,

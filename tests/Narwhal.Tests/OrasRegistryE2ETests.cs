@@ -13,7 +13,7 @@ namespace Narwhal.Tests;
 /// <c>NARWHAL_ORAS_E2E=1</c> to run it; it self-skips when oras or podman is
 /// missing, or when registry:2 cannot be pulled.
 /// </summary>
-[Collection(MultiPlatformIntegrationTests.ProcessCollection.Name)]
+[Collection(MultiPlatformIntegrationTests.CliProcessSerial.Name)]
 public class OrasRegistryE2ETests
 {
     [OrasE2EFact]

@@ -8,7 +8,7 @@ using Xunit;
 namespace Narwhal.Tests;
 
 [CollectionDefinition("oras-subprocess", DisableParallelization = true)]
-public sealed class OrasSubprocessCollection
+public sealed class OrasSubprocessSerial
 {
 }
 
@@ -152,7 +152,7 @@ public class OciRegistryClientTests
     public async Task RejectsABlobAboveTheSizeLimit()
     {
         using var oras = new FakeOras();
-        oras.Truncate(OciRegistryClient.MaximumBlobBytes + 1);
+        FakeOras.Truncate(OciRegistryClient.MaximumBlobBytes + 1);
 
         using var client = Client(new RegistryAuthConfig { Insecure = true });
         var error = await Assert.ThrowsAsync<RegistryException>(
@@ -231,7 +231,7 @@ public class OciRegistryClientTests
     public async Task EnforcesACommandTimeout()
     {
         using var oras = new FakeOras();
-        oras.Sleep(30);
+        FakeOras.Sleep(30);
         oras.Output("late"u8.ToArray());
 
         using var client = new OciRegistryClient(
@@ -341,7 +341,7 @@ public class OciRegistryClientTests
         using var oras = new FakeOras();
         oras.Output(body);
         oras.CaptureAuthFile();
-        oras.LogEnvironment("PATH");
+        FakeOras.LogEnvironment("PATH");
 
         var helper = CreateHelper(executable: true);
 
@@ -544,7 +544,7 @@ public class OciRegistryClientTests
             var body = "blob payload"u8.ToArray();
             using var oras = new FakeOras();
             oras.Output(body);
-            oras.LogEnvironment(names);
+            FakeOras.LogEnvironment(names);
 
             using var client = Client(new RegistryAuthConfig { Insecure = true });
             await client.GetBlobAsync(Repository, CloudEncoding.Sha256Digest(body), CancellationToken.None);
@@ -564,7 +564,7 @@ public class OciRegistryClientTests
     {
         using var oras = new FakeOras();
         oras.Fail(1, "");
-        oras.EmitHuge(8 * 1024 * 1024);
+        FakeOras.EmitHuge(8 * 1024 * 1024);
 
         using var client = Client(new RegistryAuthConfig { Insecure = true });
         var error = await Assert.ThrowsAsync<RegistryException>(
@@ -578,7 +578,7 @@ public class OciRegistryClientTests
     public async Task KillsTheWholeProcessTreeOnCallerCancellation()
     {
         using var oras = new FakeOras();
-        oras.Sleep(30);
+        FakeOras.Sleep(30);
         oras.CapturePid();
         oras.SpawnChild();
         oras.Output([]);
@@ -786,26 +786,26 @@ internal sealed class FakeOras : IDisposable
         Set("ORAS_FAKE_EXIT", exitCode.ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
-    public void Truncate(long size) =>
+    public static void Truncate(long size) =>
         Set("ORAS_FAKE_TRUNCATE", size.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     public void CaptureStdin() => Set("ORAS_FAKE_STDIN", _stdinPath);
 
     public void CaptureAuthFile() => Set("ORAS_FAKE_AUTH_COPY", _authCopyPath);
 
-    public void LogEnvironment(params string[] names) =>
+    public static void LogEnvironment(params string[] names) =>
         Set("ORAS_FAKE_ENV_VARS", string.Join(' ', names));
 
     public void CapturePid() => Set("ORAS_FAKE_PID", PidPath);
 
     public void SpawnChild() => Set("ORAS_FAKE_CHILD_PID", ChildPidPath);
 
-    public void EmitHuge(long bytes) =>
+    public static void EmitHuge(long bytes) =>
         Set("ORAS_FAKE_HUGE", bytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     public void CaptureLastArgument() => Set("ORAS_FAKE_CAPTURE", CapturePath);
 
-    public void Sleep(int seconds) =>
+    public static void Sleep(int seconds) =>
         Set("ORAS_FAKE_SLEEP", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
     public void Dispose()
@@ -822,7 +822,7 @@ internal sealed class FakeOras : IDisposable
         }
     }
 
-    private void Set(string variable, string value) => Environment.SetEnvironmentVariable(variable, value);
+    private static void Set(string variable, string value) => Environment.SetEnvironmentVariable(variable, value);
 
     private const string Script = """
         #!/usr/bin/env bash

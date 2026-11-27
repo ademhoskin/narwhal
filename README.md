@@ -296,9 +296,15 @@ failure, `4` reproducibility mismatch, `130` interrupted.
 
 ```sh
 nix develop              # .NET 11 SDK, clang, linker
-dotnet test tests/Narwhal.Tests
+dotnet test tests/Narwhal.Tests --nologo
+dotnet format src/Narwhal/Narwhal.csproj
+dotnet format tests/Narwhal.Tests/Narwhal.Tests.csproj
 dotnet publish src/Narwhal -c Release -r linux-x64 -o artifacts/aot
 ```
+
+Formatting is a gate in CI: `dotnet format --verify-no-changes` for each
+project and `nix fmt -- --check .` for the Nix files. Run `dotnet format` and
+`nix fmt` before pushing.
 
 The AOT publish produces `artifacts/aot/narwhal`, a self-contained binary.
 

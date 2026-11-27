@@ -344,6 +344,8 @@ public static class GuardInstaller
 /// </summary>
 public static class SystemdUnitInstaller
 {
+    private static readonly string[] SystemctlPrefix = ["systemctl"];
+
     public static SystemdUnitPlan Plan(AgentConfig config, string? unitDirectory = null)
     {
         var templates = SystemdUnitTemplates.All();
@@ -453,7 +455,7 @@ public static class SystemdUnitInstaller
                 continue;
             }
 
-            var arguments = new[] { "systemctl" }.Concat(command).ToList();
+            var arguments = SystemctlPrefix.Concat(command).ToList();
             var exitCode = runner is null
                 ? throw new AgentConfigException("no systemctl runner is available")
                 : await runner.RunAsync("systemctl", command, cancellationToken);

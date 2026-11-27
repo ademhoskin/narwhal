@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text;
 using Narwhal.Cli;
 using Narwhal.Cloud;
@@ -58,26 +57,26 @@ internal static class ReconcileTestData
         string project = Project,
         string? hostId = "i-test-host",
         IReadOnlyList<string>? logRedact = null) => new()
-    {
-        Project = project,
-        ImageRegistry = "registry.example.com",
-        StateRegistry = "state.example.net",
-        DesiredRepository = desiredRepository ?? Desired,
-        Target = new TargetConfig
         {
-            Provider = "aws",
-            Region = "us-east-1",
-            Arch = "amd64",
-            Selector = new Dictionary<string, string>(StringComparer.Ordinal) { ["stack"] = "prod" },
-        },
-        StateDirectory = stateDirectory,
-        TrustDirectory = Path.Combine(stateDirectory, "boot-trust"),
-        StatusKeyPath = Path.Combine(stateDirectory, "status-key"),
-        HostId = hostId,
-        StatusKeys = StatusKeySet.FromBase64([Convert.ToBase64String(CloudArtifactTestData.PublicKey1)]),
-        LogRedactPatterns = logRedact ?? [],
-        LockTimeoutSeconds = 0,
-    };
+            Project = project,
+            ImageRegistry = "registry.example.com",
+            StateRegistry = "state.example.net",
+            DesiredRepository = desiredRepository ?? Desired,
+            Target = new TargetConfig
+            {
+                Provider = "aws",
+                Region = "us-east-1",
+                Arch = "amd64",
+                Selector = new Dictionary<string, string>(StringComparer.Ordinal) { ["stack"] = "prod" },
+            },
+            StateDirectory = stateDirectory,
+            TrustDirectory = Path.Combine(stateDirectory, "boot-trust"),
+            StatusKeyPath = Path.Combine(stateDirectory, "status-key"),
+            HostId = hostId,
+            StatusKeys = StatusKeySet.FromBase64([Convert.ToBase64String(CloudArtifactTestData.PublicKey1)]),
+            LogRedactPatterns = logRedact ?? [],
+            LockTimeoutSeconds = 0,
+        };
 
     public static string CreateStateDirectory()
     {

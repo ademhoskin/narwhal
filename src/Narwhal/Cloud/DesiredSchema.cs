@@ -156,7 +156,7 @@ internal static class DesiredSchema
         return new IngressRule { Protocol = protocol, Port = port, Source = sources };
     }
 
-    private static IReadOnlyDictionary<string, ImageSpec> ParseImages(JsonElement value, string path)
+    private static Dictionary<string, ImageSpec> ParseImages(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         if (!obj.EnumerateObject().Any())
@@ -190,7 +190,7 @@ internal static class DesiredSchema
         };
     }
 
-    private static IReadOnlyDictionary<string, ServiceSpec> ParseServices(JsonElement value, string path)
+    private static Dictionary<string, ServiceSpec> ParseServices(JsonElement value, string path)
     {
         var obj = JsonShape.Object(value, path);
         if (!obj.EnumerateObject().Any())
@@ -423,7 +423,7 @@ internal static class DesiredSchema
         return text;
     }
 
-    private static IReadOnlyList<string> Strings(JsonElement array, string path)
+    private static List<string> Strings(JsonElement array, string path)
     {
         var items = new List<string>(array.GetArrayLength());
         for (var i = 0; i < array.GetArrayLength(); i++)
@@ -431,7 +431,7 @@ internal static class DesiredSchema
         return items;
     }
 
-    private static IReadOnlyList<string> ParseUniqueStrings(JsonElement array, string path)
+    private static List<string> ParseUniqueStrings(JsonElement array, string path)
     {
         var items = Strings(array, path);
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -444,7 +444,7 @@ internal static class DesiredSchema
         return items;
     }
 
-    private static IReadOnlyList<string> ArrayOrEmpty(
+    private static List<string> ArrayOrEmpty(
         JsonElement obj,
         string name,
         string path,

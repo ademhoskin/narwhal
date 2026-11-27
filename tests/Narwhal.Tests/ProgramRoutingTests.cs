@@ -2,7 +2,7 @@ using Xunit;
 
 namespace Narwhal.Tests;
 
-[Collection(MultiPlatformIntegrationTests.ProcessCollection.Name)]
+[Collection(MultiPlatformIntegrationTests.CliProcessSerial.Name)]
 public class ProgramRoutingTests
 {
     [Fact]

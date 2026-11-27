@@ -269,7 +269,8 @@ public sealed class ReconcileStore
         }
         finally
         {
-            close(fd);
+            // close() has no actionable failure here; the fsync above is the operation that matters.
+            _ = close(fd);
         }
     }
 
@@ -365,8 +366,9 @@ public sealed class ReconcileLock : IDisposable
         if (_disposed)
             return;
         _disposed = true;
-        flock(_fd, LockUnlock);
-        close(_fd);
+        // Unlocking and closing cannot fail in a way Dispose can report.
+        _ = flock(_fd, LockUnlock);
+        _ = close(_fd);
     }
 
     public static async Task<ReconcileLock?> AcquireAsync(string path, TimeSpan timeout, CancellationToken cancellationToken)
@@ -388,7 +390,8 @@ public sealed class ReconcileLock : IDisposable
             var remaining = timeout - elapsed.Elapsed;
             if (remaining <= TimeSpan.Zero)
             {
-                close(fd);
+                // The lock was never acquired; there is nothing to unlock.
+                _ = close(fd);
                 return null;
             }
 

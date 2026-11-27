@@ -6,7 +6,7 @@ using Xunit;
 
 namespace Narwhal.Tests;
 
-[Collection(MultiPlatformIntegrationTests.ProcessCollection.Name)]
+[Collection(MultiPlatformIntegrationTests.CliProcessSerial.Name)]
 public class PushLockTests
 {
     [Fact]
@@ -220,7 +220,8 @@ public class PushLockTests
         }
         finally
         {
-            Umask(previousMask);
+            // The process is exiting either way; a failed restore cannot be reported here.
+            _ = Umask(previousMask);
             PushLock.HomeOverride = previousHome;
             PushLock.IgnoreRuntimeDirectoryForTests = previousIgnore;
             Directory.Delete(home, recursive: true);

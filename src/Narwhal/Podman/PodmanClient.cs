@@ -21,7 +21,7 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
     public const string ManifestLabel = "io.narwhal.manifest";
     public const string ImageIdLabel = "io.narwhal.image-id";
 
-    public string Executable => Environment.GetEnvironmentVariable("NARWHAL_PODMAN") ?? "podman";
+    public static string Executable => Environment.GetEnvironmentVariable("NARWHAL_PODMAN") ?? "podman";
 
     public static string ContainerName(string project, string service) => $"{project}-{service}";
 

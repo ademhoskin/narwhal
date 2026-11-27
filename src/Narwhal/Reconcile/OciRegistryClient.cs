@@ -419,7 +419,7 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
         return null;
     }
 
-    private string Bound(string text) =>
+    private static string Bound(string text) =>
         text.Length <= MaximumCapturedChars
             ? text
             : text[..MaximumCapturedChars] + "\n...(output truncated)";
@@ -665,7 +665,7 @@ public sealed class OciRegistryClient : IRegistryClient, IStatusRegistry, IDispo
         }
     }
 
-    private async Task<byte[]> ReadFileAsync(
+    private static async Task<byte[]> ReadFileAsync(
         string path,
         long limit,
         string description,

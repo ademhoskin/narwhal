@@ -1,7 +1,6 @@
 using System.Globalization;
 using Narwhal.Cli;
 using Narwhal.Cloud;
-using Narwhal.Config;
 using Narwhal.Podman;
 
 namespace Narwhal.Reconcile;
@@ -484,14 +483,14 @@ public sealed class ReconcileEngine
             {
                 Protocol = rule.Protocol,
                 Port = rule.Port,
-                Source = rule.Source.ToList(),
+                Source = [.. rule.Source],
             }).ToList();
             status.Observed = new StatusObserved
             {
                 Generation = generation,
                 PayloadDigest = resolved.Verified.PayloadDigest,
                 ManifestDigest = resolved.Manifest.Digest,
-                KeyId = resolved.Verified.VerifyingKeyIds.FirstOrDefault(),
+                KeyId = resolved.Verified.VerifyingKeyIds.Count > 0 ? resolved.Verified.VerifyingKeyIds[0] : null,
             };
             status.Attempts = new StatusAttempts
             {
@@ -925,7 +924,7 @@ public sealed class ReconcileEngine
             Generation = generation,
             PayloadDigest = resolved.Verified.PayloadDigest,
             ManifestDigest = resolved.Manifest.Digest,
-            KeyId = resolved.Verified.VerifyingKeyIds.FirstOrDefault(),
+            KeyId = resolved.Verified.VerifyingKeyIds.Count > 0 ? resolved.Verified.VerifyingKeyIds[0] : null,
         };
     }
 
