@@ -171,7 +171,7 @@ public static class ReconcileCommand
             Updated = DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
             Host = new StatusHost
             {
-                NarwhaldVersion = new AgentUpgrader(config.StateDirectory, source: null, new Reporter(false, false))
+                NarwhalVersion = new AgentUpgrader(config.StateDirectory, source: null, new Reporter(false, false))
                     .InstalledVersion ?? App.Version,
             },
             Phase = state.Phase,

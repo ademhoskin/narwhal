@@ -1415,7 +1415,7 @@ public sealed class ReconcileEngine
             Id = _hostId,
             BootId = TryReadBootId(),
             StartedAt = _startedAt,
-            NarwhaldVersion = _agentUpgrader?.InstalledVersion ?? App.Version,
+            NarwhalVersion = _agentUpgrader?.InstalledVersion ?? App.Version,
             StatusKeyId = _statusKeyId,
             AgentRollbackVersion = state.AgentRollbackVersion,
             BlockedAgentDigest = AgentDigest.TryNormalize(state.BlockedAgentDigest),

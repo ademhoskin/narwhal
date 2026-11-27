@@ -55,7 +55,7 @@ internal static class StatusTestData
             {
                 Id = HostId,
                 BootId = BootId,
-                NarwhaldVersion = "0.1.0",
+                NarwhalVersion = "0.1.0",
                 StartedAt = "2026-11-24T17:00:00Z",
                 StatusKeyId = statusKeyId,
             },

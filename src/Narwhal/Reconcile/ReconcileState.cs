@@ -145,7 +145,7 @@ public sealed class StatusHost
 {
     public string? Id { get; set; }
     public string? BootId { get; set; }
-    public string NarwhaldVersion { get; set; } = App.Version;
+    public string NarwhalVersion { get; set; } = App.Version;
     public string? AgentRollbackVersion { get; set; }
     public string? StartedAt { get; set; }
     public string? StatusKeyId { get; set; }

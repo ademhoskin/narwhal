@@ -374,7 +374,7 @@ public class AgentUpgraderTests
 
         var outcome = await engine.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal("0.3.0", outcome.Status.Host.NarwhaldVersion);
+        Assert.Equal("0.3.0", outcome.Status.Host.NarwhalVersion);
     }
 
     [Fact]

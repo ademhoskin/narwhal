@@ -33,12 +33,6 @@ public static class SystemdUnitTemplates
     public const string GuardService = "narwhal-guard.service";
     public const string GuardTimer = "narwhal-guard.timer";
 
-    public const string LegacyDaemonUnit = "narwhald.service";
-    public const string LegacyReconcileService = "narwhald-reconcile.service";
-    public const string LegacyReconcileTimer = "narwhald-reconcile.timer";
-    public const string LegacyGuardService = "narwhald-guard.service";
-    public const string LegacyGuardTimer = "narwhald-guard.timer";
-
     public static readonly string[] Names = [DaemonUnit, ReconcileService, ReconcileTimer];
     public static readonly string[] GuardNames = [GuardService, GuardTimer];
 
@@ -133,7 +127,6 @@ public static class SystemdUnitTemplates
 public static class GuardInstaller
 {
     public const string GuardBinaryPath = "/usr/local/libexec/narwhal";
-    public const string LegacyGuardBinaryPath = "/usr/local/libexec/narwhal-guard";
     public const string DefaultSystemUnitDirectory = "/etc/systemd/system";
     private const UnixFileMode InstalledMode =
         UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
@@ -159,33 +152,7 @@ public static class GuardInstaller
 
         var plan = SystemdUnitInstaller.PlanGuard(unitDirectory);
         await SystemdUnitInstaller.ApplyAsync(plan, dryRun, reporter, runner, cancellationToken);
-        RemoveLegacyBinary(LegacyGuardBinaryPath, dryRun, reporter);
         return 0;
-    }
-
-    /// <summary>Removes the pre-rename guard copy so it cannot race the stable guard.</summary>
-    public static bool RemoveLegacyBinary(string path, bool dryRun, Reporter reporter)
-    {
-        var resolved = Path.GetFullPath(path);
-        if (string.Equals(resolved, Path.GetFullPath(GuardBinaryPath), StringComparison.Ordinal))
-            throw new AgentConfigException($"refusing to remove the stable guard binary: {path}");
-        if (!File.Exists(path) && new FileInfo(path).LinkTarget is null)
-            return false;
-        if (dryRun)
-        {
-            reporter.Info($"would remove {path}");
-            return false;
-        }
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            throw new AgentConfigException($"cannot remove legacy guard binary {path}: {e.Message}");
-        }
-        reporter.Info($"removed {path}");
-        return true;
     }
 
     public static bool InstallBinary(
@@ -357,14 +324,6 @@ public static class SystemdUnitInstaller
         var disable = daemonMode ? SystemdUnitTemplates.ReconcileTimer : SystemdUnitTemplates.DaemonUnit;
 
         var directory = unitDirectory ?? DefaultUnitDirectory();
-        var legacy = new[]
-            {
-                SystemdUnitTemplates.LegacyDaemonUnit,
-                SystemdUnitTemplates.LegacyReconcileService,
-                SystemdUnitTemplates.LegacyReconcileTimer,
-            }
-            .Where(name => File.Exists(Path.Combine(directory, name)))
-            .ToList();
         var files = templates
             .Select(template =>
             {
@@ -379,8 +338,6 @@ public static class SystemdUnitInstaller
             commands.Add(["--user", "daemon-reload"]);
         commands.Add(["--user", "disable", "--now", disable]);
         commands.Add(["--user", "enable", "--now", enable]);
-        if (legacy.Count > 0)
-            commands.Add(["--user", "disable", "--now", .. legacy]);
 
         return new SystemdUnitPlan(directory, enable, disable, files, commands);
     }
@@ -404,15 +361,10 @@ public static class SystemdUnitInstaller
             })
             .ToList();
 
-        var legacy = new[] { SystemdUnitTemplates.LegacyGuardTimer, SystemdUnitTemplates.LegacyGuardService }
-            .Where(name => File.Exists(Path.Combine(unitDirectory, name)))
-            .ToList();
         var commands = new List<IReadOnlyList<string>>();
         if (files.Any(file => file.Changed))
             commands.Add(["daemon-reload"]);
         commands.Add(["enable", "--now", SystemdUnitTemplates.GuardTimer]);
-        if (legacy.Count > 0)
-            commands.Add(["disable", "--now", .. legacy]);
         return new SystemdUnitPlan(
             unitDirectory,
             SystemdUnitTemplates.GuardTimer,

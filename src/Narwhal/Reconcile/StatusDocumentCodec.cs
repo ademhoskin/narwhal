@@ -181,7 +181,7 @@ public static class StatusDocumentCodec
         writer.WriteStartObject("host");
         WriteNullableString(writer, "id", host.Id);
         WriteNullableString(writer, "boot_id", host.BootId);
-        writer.WriteString("narwhald_version", host.NarwhaldVersion);
+        writer.WriteString("narwhal_version", host.NarwhalVersion);
         WriteNullableString(writer, "agent_rollback_version", host.AgentRollbackVersion);
         WriteNullableString(writer, "started_at", host.StartedAt);
         WriteNullableString(writer, "status_key_id", host.StatusKeyId);
@@ -362,7 +362,7 @@ public static class StatusDocumentCodec
             obj,
             path,
             CloudArtifactErrorCodes.SchemaInvalid,
-            "id", "boot_id", "narwhald_version", "agent_rollback_version", "started_at",
+            "id", "boot_id", "narwhal_version", "agent_rollback_version", "started_at",
             "status_key_id", "blocked_agent_digest");
 
         var keyId = JsonShape.String(JsonShape.Required(obj, path, "status_key_id"), $"{path}.status_key_id");
@@ -373,7 +373,7 @@ public static class StatusDocumentCodec
         {
             Id = NullableString(obj, path, "id"),
             BootId = NullableString(obj, path, "boot_id"),
-            NarwhaldVersion = JsonShape.NonEmptyString(JsonShape.Required(obj, path, "narwhald_version"), $"{path}.narwhald_version"),
+            NarwhalVersion = JsonShape.NonEmptyString(JsonShape.Required(obj, path, "narwhal_version"), $"{path}.narwhal_version"),
             AgentRollbackVersion = NullableString(obj, path, "agent_rollback_version"),
             StartedAt = OptionalTimestamp(obj, path, "started_at"),
             StatusKeyId = keyId,

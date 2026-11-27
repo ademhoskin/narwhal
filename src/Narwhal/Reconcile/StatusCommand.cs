@@ -174,7 +174,7 @@ public static class StatusCommand
                 ["epoch", status.Epoch.ToString(System.Globalization.CultureInfo.InvariantCulture)],
                 ["host", status.Host.Id ?? "-"],
                 ["boot_id", status.Host.BootId ?? "-"],
-                ["narwhal", status.Host.NarwhaldVersion],
+                ["narwhal", status.Host.NarwhalVersion],
                 ["status_key_id", status.Host.StatusKeyId ?? "-"],
                 ["highest_generation", status.HighestGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture)],
                 ["blocked_generation", status.BlockedGeneration?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-"],

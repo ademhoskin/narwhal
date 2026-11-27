@@ -1312,7 +1312,7 @@ Exact status shape:
   "host": {
     "id": "i-0a1b2c3d4e5f67890",
     "boot_id": "4c1f9a7e2b3d4c5e",
-    "narwhald_version": "0.3.0",
+    "narwhal_version": "0.3.0",
     "agent_rollback_version": null,
     "started_at": "2026-11-24T17:00:00Z",
     "status_key_id": "1a2b3c4d5e6f7081",
@@ -1949,16 +1949,8 @@ and controlled by the signed desired state.
   operator can force a downgrade by reprovisioning, not by an inbound command.
   Version ordering uses semver precedence; build metadata is ignored and a
   non-semver pair falls back to ordinal comparison.
-- The pre-rename artifact layout is not migrated automatically. A host with a
-  version directory containing only `narwhald`, or with the old
-  `narwhald.service`, `narwhald-reconcile.*`, `narwhald-guard.*` units, or
-  `/usr/local/libexec/narwhal-guard`, must re-run bootstrap so the agent image
-  stages `narwhal` before the new units are installed. `install-units` disables
-  the legacy user units; `install-guard` disables the legacy guard units and
-  removes the old guard copy. Neither can supply the new agent binary;
-  installing the new units without re-staging is unsupported. The signed
-  status wire field stays `narwhald_version` (`NarwhaldVersion`) for
-  compatibility.
+- Artifacts from the pre-rename layout are unsupported; such hosts must be
+  reprovisioned.
 
 ### 5.3 Offline and registry-unreachable behavior
 

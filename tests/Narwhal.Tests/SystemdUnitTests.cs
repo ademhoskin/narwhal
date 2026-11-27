@@ -147,56 +147,9 @@ public class SystemdUnitTests
     }
 
     [Fact]
-    public void RemovesTheLegacyGuardBinary()
-    {
-        var directory = DaemonRunnerTests.TestDirectory();
-        var legacy = Path.Combine(directory, "narwhal-guard");
-        File.WriteAllText(legacy, "guard");
-        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
-
-        Assert.True(GuardInstaller.RemoveLegacyBinary(legacy, dryRun: false, reporter));
-        Assert.False(File.Exists(legacy));
-    }
-
-    [Fact]
-    public void GuardBinaryPathsArePinnedAndDistinct()
+    public void GuardBinaryPathIsPinned()
     {
         Assert.Equal("/usr/local/libexec/narwhal", GuardInstaller.GuardBinaryPath);
-        Assert.Equal("/usr/local/libexec/narwhal-guard", GuardInstaller.LegacyGuardBinaryPath);
-        Assert.NotEqual(GuardInstaller.GuardBinaryPath, GuardInstaller.LegacyGuardBinaryPath);
-    }
-
-    [Fact]
-    public void RefusesToRemoveTheStableGuardBinary()
-    {
-        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
-
-        Assert.Throws<AgentConfigException>(() =>
-            GuardInstaller.RemoveLegacyBinary(GuardInstaller.GuardBinaryPath, dryRun: false, reporter));
-    }
-
-    [Fact]
-    public void RemovesADanglingLegacyGuardSymlink()
-    {
-        var directory = DaemonRunnerTests.TestDirectory();
-        var legacy = Path.Combine(directory, "narwhal-guard");
-        File.CreateSymbolicLink(legacy, Path.Combine(directory, "missing-target"));
-        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
-
-        Assert.True(GuardInstaller.RemoveLegacyBinary(legacy, dryRun: false, reporter));
-        Assert.Null(new FileInfo(legacy).LinkTarget);
-    }
-
-    [Fact]
-    public void DryRunLeavesTheLegacyGuardBinary()
-    {
-        var directory = DaemonRunnerTests.TestDirectory();
-        var legacy = Path.Combine(directory, "narwhal-guard");
-        File.WriteAllText(legacy, "guard");
-        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
-
-        Assert.False(GuardInstaller.RemoveLegacyBinary(legacy, dryRun: true, reporter));
-        Assert.True(File.Exists(legacy));
     }
 
     [Fact]
@@ -234,49 +187,6 @@ public class SystemdUnitTests
         Assert.Equal(["--user", "daemon-reload"], plan.Commands[0]);
         Assert.Equal(["--user", "disable", "--now", disable], plan.Commands[1]);
         Assert.Equal(["--user", "enable", "--now", enable], plan.Commands[2]);
-    }
-
-    [Fact]
-    public void PlanDisablesLegacyUserUnitsThatExist()
-    {
-        var directory = DaemonRunnerTests.TestDirectory();
-        var unitDirectory = Path.Combine(directory, "units");
-        Directory.CreateDirectory(unitDirectory);
-        File.WriteAllText(Path.Combine(unitDirectory, SystemdUnitTemplates.LegacyDaemonUnit), "old");
-        File.WriteAllText(Path.Combine(unitDirectory, SystemdUnitTemplates.LegacyReconcileService), "old");
-        File.WriteAllText(Path.Combine(unitDirectory, SystemdUnitTemplates.LegacyReconcileTimer), "old");
-
-        var plan = SystemdUnitInstaller.Plan(Config("daemon"), unitDirectory);
-
-        Assert.Equal(
-            [
-                "--user",
-                "disable",
-                "--now",
-                SystemdUnitTemplates.LegacyDaemonUnit,
-                SystemdUnitTemplates.LegacyReconcileService,
-                SystemdUnitTemplates.LegacyReconcileTimer,
-            ],
-            plan.Commands[^1]);
-    }
-
-    [Fact]
-    public void PlanGuardDisablesLegacyGuardUnitsThatExist()
-    {
-        var directory = DaemonRunnerTests.TestDirectory();
-        File.WriteAllText(Path.Combine(directory, SystemdUnitTemplates.LegacyGuardTimer), "old");
-        File.WriteAllText(Path.Combine(directory, SystemdUnitTemplates.LegacyGuardService), "old");
-
-        var plan = SystemdUnitInstaller.PlanGuard(directory);
-
-        Assert.Equal(
-            [
-                "disable",
-                "--now",
-                SystemdUnitTemplates.LegacyGuardTimer,
-                SystemdUnitTemplates.LegacyGuardService,
-            ],
-            plan.Commands[^1]);
     }
 
     [Fact]

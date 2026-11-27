@@ -24,6 +24,7 @@ public class StatusDocumentTests
         Assert.Equal(3, decoded.Epoch);
         Assert.Equal(StatusTestData.HostId, decoded.Host.Id);
         Assert.Equal(StatusTestData.BootId, decoded.Host.BootId);
+        Assert.Equal("0.1.0", decoded.Host.NarwhalVersion);
         Assert.Equal(CloudArtifactTestData.KeyId1, decoded.Host.StatusKeyId);
         Assert.Equal(42, decoded.HighestGeneration);
         Assert.Equal(ReconcilePhases.Idle, decoded.Phase);
@@ -36,6 +37,42 @@ public class StatusDocumentTests
     }
 
     [Fact]
+    public void EncodesTheRenamedHostVersionField()
+    {
+        var payload = Encoding.UTF8.GetString(StatusDocumentCodec.Encode(StatusTestData.Document()));
+
+        Assert.Contains("\"narwhal_version\":\"0.1.0\"", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("narwhald_version", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RejectsThePreRenameHostVersionField()
+    {
+        var payload = Encoding.UTF8.GetString(StatusDocumentCodec.Encode(StatusTestData.Document()));
+        var mutated = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(
+            payload.Replace("\"narwhal_version\"", "\"narwhald_version\"", StringComparison.Ordinal)));
+
+        var error = Assert.Throws<CloudArtifactException>(() => StatusDocumentCodec.Decode(mutated));
+        Assert.Equal(CloudArtifactErrorCodes.SchemaInvalid, error.Code);
+        Assert.Contains("unexpected field 'narwhald_version'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RejectsBothHostVersionFieldsAtOnce()
+    {
+        var payload = Encoding.UTF8.GetString(StatusDocumentCodec.Encode(StatusTestData.Document()));
+        var mutated = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(
+            payload.Replace(
+                "\"narwhal_version\":\"0.1.0\"",
+                "\"narwhal_version\":\"0.1.0\",\"narwhald_version\":\"0.1.0\"",
+                StringComparison.Ordinal)));
+
+        var error = Assert.Throws<CloudArtifactException>(() => StatusDocumentCodec.Decode(mutated));
+        Assert.Equal(CloudArtifactErrorCodes.SchemaInvalid, error.Code);
+        Assert.Contains("unexpected field 'narwhald_version'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void WritesExplicitNullsForTheDocumentedShape()
     {
         var payload = Encoding.UTF8.GetString(StatusDocumentCodec.Encode(StatusTestData.Document()));
@@ -45,6 +82,7 @@ public class StatusDocumentTests
         Assert.Contains("\"agent_rollback_version\":null", payload, StringComparison.Ordinal);
         Assert.Contains("\"blocked_agent_digest\":null", payload, StringComparison.Ordinal);
         Assert.Contains("\"status_key_id\":\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"narwhal_version\":\"0.1.0\"", payload, StringComparison.Ordinal);
         Assert.Contains("\"schema\":\"narwhal.status/v1\"", payload, StringComparison.Ordinal);
     }
 
