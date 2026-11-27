@@ -20,7 +20,7 @@ Fixed constraints, restated so every section can be checked against them:
   empty by default.
 - The host pulls a signed desired-state artifact from the registry, reconciles
   locally, and publishes signed status back to the registry.
-- `narwhal reconcile` (one-shot) and `narwhald` (polling agent) use one reconcile
+- `narwhal reconcile` (one-shot) and `narwhal daemon` (polling agent) use one reconcile
   engine.
 - A systemd user timer is the fallback when the agent is not used.
 - AWS SSM State Manager is optional, AWS only, and never the transport.
@@ -123,7 +123,7 @@ flowchart LR
     S["project/state/<target>/status"]
   end
   subgraph Host["VM (least privilege)"]
-    A["narwhald / narwhal reconcile"]
+    A["narwhal daemon / narwhal reconcile"]
     HK["per-host status key"]
     P["rootless podman"]
     L["/var/lib/narwhal"]
@@ -162,7 +162,7 @@ workload never receives write access to the registry or any signing key.
 
 The design separates the image registry from the state registry:
 
-- `image_registry` stores service images and the narwhald image.
+- `image_registry` stores service images and the narwhal agent image.
 - `state_registry` stores desired-state and status artifacts.
 
 They may be the same registry for AWS and GCP. They must be separate for
@@ -175,7 +175,7 @@ Default layout:
 
 ```text
 <image_registry>/<project>/<service>                    image repositories
-<image_registry>/<project>/narwhald                     agent image
+<image_registry>/<project>/narwhal                      agent image
 <state_registry>/<project>/state/<target>/desired       desired-state OCI artifacts
 <state_registry>/<project>/state/<target>/status        status OCI artifacts
 ```
@@ -549,7 +549,7 @@ Field notes:
   never creates host directories from the artifact.
 - `health` is optional. `null` and omission both mean no container health check.
 - `restart` defaults to `unless-stopped`.
-- `agent` is optional. When present, it authorizes a narwhald upgrade. See
+- `agent` is optional. When present, it authorizes an agent upgrade. See
   section 5.2.
 - `trust` is optional. When present, it replaces the effective trust set after a
   successful verification by a key in the intersection of the old and new sets.
@@ -655,7 +655,7 @@ Example payload:
   },
   "agent": {
     "version": "0.3.0",
-    "repository": "registry.example.com/shop/narwhald",
+    "repository": "registry.example.com/shop/narwhal",
     "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "binary_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
   }
@@ -935,7 +935,7 @@ timestamps, signature `not_after`, and status freshness.
 
 There is one engine, `Narwhal.Reconcile`, used by both entry points:
 
-- `narwhald`: a long-running systemd **user** service for the `narwhal` user.
+- `narwhal daemon`: a long-running systemd **user** service for the `narwhal` user.
   It polls, applies, signs and publishes status, and repeats.
 - `narwhal reconcile`: a one-shot invocation of the same engine. Intended for a
   systemd **user** timer, manual recovery, or the optional AWS SSM association.
@@ -958,7 +958,7 @@ explicitly:
 runuser -u narwhal -- env \
   XDG_RUNTIME_DIR=/run/user/<uid> \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus \
-  systemctl --user enable --now narwhald.service
+  systemctl --user enable --now narwhal.service
 ```
 
 A `flock` on `/var/lib/narwhal/lock` serializes the daemon and one-shot. A
@@ -1581,9 +1581,9 @@ bootstrap.
 | Bootstrap secrets | None in user-data. The instance role calls `ssm:GetParameter` with `WithDecryption=true` or `secretsmanager:GetSecretValue`. `kms:Decrypt` is granted only for the keys used by those parameters. |
 | Data-plane ingress | `narwhal deploy` reconciles a dedicated `aws_security_group` with `DescribeSecurityGroups`, `AuthorizeSecurityGroupIngress`, and `RevokeSecurityGroupIngress`. Each rule uses `protocol`, `from_port=to_port=port`, IPv4 sources in `cidr_blocks`, and IPv6 sources in `ipv6_cidr_blocks`. No control-plane rule. |
 | Firewall write | The deploy principal needs `ec2:DescribeSecurityGroups`, `ec2:AuthorizeSecurityGroupIngress`, and `ec2:RevokeSecurityGroupIngress` on the target group only. The instance role does not get these permissions. |
-| Registry | Amazon ECR, with separate `aws_ecr_repository` resources for each service image, `narwhald`, desired state, and status. The agent gets a 12-hour authorization token via `ecr:GetAuthorizationToken` and uses ECR basic auth with username `AWS`. Repository-level IAM enforces pull and push scope. `ecr:GetAuthorizationToken` is the one action that needs `*`. |
+| Registry | Amazon ECR, with separate `aws_ecr_repository` resources for each service image, `narwhal`, desired state, and status. The agent gets a 12-hour authorization token via `ecr:GetAuthorizationToken` and uses ECR basic auth with username `AWS`. Repository-level IAM enforces pull and push scope. `ecr:GetAuthorizationToken` is the one action that needs `*`. |
 | Status write | `ecr:PutImage`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload` scoped to the status repository ARN. |
-| Optional SSM | An SSM State Manager association can run `runuser -u narwhal -- env XDG_RUNTIME_DIR=/run/user/<uid> /var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml` on a schedule, so rootless podman runs in the user manager. The SSM agent connects outbound to `ssmmessages`. Only State Manager associations are used; SSM Run Command is not. The instance role policy includes an explicit `Deny` for `ssm:SendCommand` on `*`, and the operator/CI role policies grant no `ssm:SendCommand`. This is a fallback and never the desired-state transport. |
+| Optional SSM | An SSM State Manager association can run `runuser -u narwhal -- env XDG_RUNTIME_DIR=/run/user/<uid> /var/lib/narwhal/agent/current/narwhal reconcile --config /etc/narwhal/agent.toml` on a schedule, so rootless podman runs in the user manager. The SSM agent connects outbound to `ssmmessages`. Only State Manager associations are used; SSM Run Command is not. The instance role policy includes an explicit `Deny` for `ssm:SendCommand` on `*`, and the operator/CI role policies grant no `ssm:SendCommand`. This is a fallback and never the desired-state transport. |
 | OpenTofu | `aws_instance`, `aws_iam_role`, `aws_iam_instance_profile`, `aws_iam_role_policy` with an explicit `Deny` for `ssm:SendCommand`, an empty `aws_security_group` (no control-plane or data-plane ingress), `aws_ecr_repository` for images and state, `aws_vpc`, `aws_subnet`, `aws_internet_gateway`, `aws_eip`, optional `aws_ssm_association`, optional `aws_cloudwatch_log_group`. |
 
 AWS notes:
@@ -1843,7 +1843,7 @@ Provider-specific code is confined to:
    on every boot.
 3. `narwhal-bootstrap.service` is `Restart=on-failure` with `RestartSec=30`.
    It runs on every boot, not only the first. If
-   `/var/lib/narwhal/agent/<version>/narwhald` exists and matches
+   `/var/lib/narwhal/agent/<version>/narwhal` exists and matches
    `agent_binary_sha256`, bootstrap reuses it. Otherwise it logs in to the
    image and state registries, pulls the agent image by digest, extracts the
    binary, verifies the SHA-256, and only then atomically updates
@@ -1870,19 +1870,19 @@ Provider-specific code is confined to:
    file exists with the same digest, it is a no-op. Otherwise bootstrap writes
    the new content atomically. It never merges a partial file.
 7. Bootstrap writes the user units only when their content differs, then
-   enables exactly one of `narwhald.service` or
-   `narwhald-reconcile.timer` with `systemctl --user` as `narwhal`, and disables
+   enables exactly one of `narwhal.service` or
+   `narwhal-reconcile.timer` with `systemctl --user` as `narwhal`, and disables
    the other. It enables the distribution's `podman-restart.service` user unit
    if present. Nothing is enabled until the agent binary, status key, config,
    and trust set are all in place.
    Bootstrap copies the verified agent binary to a root-owned staging path
    outside the agent-writable tree, then installs the stable guard with
-   `narwhald install-guard --system --guard-binary /etc/narwhal/narwhald.stage --sha256 <binary_sha256>`.
+   `narwhal install-guard --system --guard-binary /etc/narwhal/narwhal.stage --sha256 <binary_sha256>`.
    The command refuses a non-root caller, a symlink, a non-regular or empty
    source, a source not owned by root, a group- or world-writable source, and a
    SHA-256 pin mismatch. It opens the source once, copies it to
-   `/usr/local/libexec/narwhal-guard` mode `0755`, fsyncs the file and parent
-   directory, and enables `narwhald-guard.timer`. It is idempotent and
+   `/usr/local/libexec/narwhal` mode `0755`, fsyncs the file and parent
+   directory, and enables `narwhal-guard.timer`. It is idempotent and
    `--dry-run` writes nothing.
 8. After trust, status key, config, and units are all valid, bootstrap writes
    `/etc/narwhal/bootstrap-complete` atomically, root-owned and not writable by
@@ -1902,7 +1902,7 @@ is a bootstrap failure, not a running deployment. Because every step is
 idempotent, a retry after a partial bootstrap resumes without reseeding trust or
 replacing a valid status key.
 
-### 5.2 Upgrading narwhald
+### 5.2 Upgrading the agent
 
 The agent binary is a versioned, digest-pinned artifact. Upgrades are optional
 and controlled by the signed desired state.
@@ -1910,22 +1910,22 @@ and controlled by the signed desired state.
 - The desired payload may include `agent` with `version`, `repository`,
   `digest`, and `binary_sha256`.
 - A running agent pulls the agent image by digest and verifies the manifest
-  digest, extracts `narwhald` from a tar or gzip layer, and verifies
+  digest, extracts `narwhal` from a tar or gzip layer, and verifies
   `binary_sha256`. A raw binary layer uses
   `application/vnd.narwhal.agent.binary.v1+octet-stream`. The digest and hash
   are inside the signed payload, so a registry attacker cannot substitute an
   agent.
 - The new binary is installed under
-  `/var/lib/narwhal/agent/<version>/narwhald`. A symlink
+  `/var/lib/narwhal/agent/<version>/narwhal`. A symlink
   `/var/lib/narwhal/agent/current` is swapped atomically. The user unit starts
-  `/var/lib/narwhal/agent/current/narwhald`, so the unprivileged agent user can
+  `/var/lib/narwhal/agent/current/narwhal`, so the unprivileged agent user can
   perform the swap without writing to `/usr/local/bin`.
 - The agent exits with a restart request after writing a `pending` marker. The
   user manager restarts it into the new binary.
 - The new agent writes `/var/lib/narwhal/agent/boot-ok` after one successful
   reconcile. A root-owned system timer runs a stable guard copy at
-  `/usr/local/libexec/narwhal-guard` as `User=narwhal`. The guard command
-  (`narwhald guard --config /etc/narwhal/agent.toml`) takes only the
+  `/usr/local/libexec/narwhal` as `User=narwhal`. The guard command
+  (`narwhal guard --config /etc/narwhal/agent.toml`) takes only the
   non-blocking `agent-upgrade.lock` and reverts `current` to the previous
   version if the new version does not produce `boot-ok` within 10 minutes or
   starts more than three times without it. It does not take the reconcile lock
@@ -1949,6 +1949,16 @@ and controlled by the signed desired state.
   operator can force a downgrade by reprovisioning, not by an inbound command.
   Version ordering uses semver precedence; build metadata is ignored and a
   non-semver pair falls back to ordinal comparison.
+- The pre-rename artifact layout is not migrated automatically. A host with a
+  version directory containing only `narwhald`, or with the old
+  `narwhald.service`, `narwhald-reconcile.*`, `narwhald-guard.*` units, or
+  `/usr/local/libexec/narwhal-guard`, must re-run bootstrap so the agent image
+  stages `narwhal` before the new units are installed. `install-units` disables
+  the legacy user units; `install-guard` disables the legacy guard units and
+  removes the old guard copy. Neither can supply the new agent binary;
+  installing the new units without re-staging is unsupported. The signed
+  status wire field stays `narwhald_version` (`NarwhaldVersion`) for
+  compatibility.
 
 ### 5.3 Offline and registry-unreachable behavior
 
@@ -1990,7 +2000,7 @@ Covered in 3.5. Operationally:
 ### 5.5 Reboot
 
 - Lingering starts the `narwhal` user manager at boot. It starts either
-  `narwhald.service` or the timer, and the distribution's
+  `narwhal.service` or the timer, and the distribution's
   `podman-restart.service` user unit if enabled.
 - Containers with `restart=always` or `unless-stopped` may start before the
   agent. The agent reconciles them to the desired labels, manifest digests, and
@@ -2091,10 +2101,12 @@ Global options (`--json`, `--no-color`, `-v`, `--file`, `-C`) keep their current
 meaning. `--json` is supported by `deploy`, `reconcile`, `status`, `rollback`,
 `logs`, and `targets`. `--follow` is local-only.
 
-The host-local `narwhald` entrypoint adds `reconcile`, `guard`, `install-units`,
-and `install-guard`. `install-guard --system --guard-binary <path> --sha256
+The host-local agent subcommands are `narwhal daemon`, `narwhal guard`,
+`narwhal install-units`, and `narwhal install-guard`.
+`install-guard --system --guard-binary <path> --sha256
 <pin>` is the root bootstrap step for the stable guard copy and its system
-units; `--dry-run` prints the plan without writing.
+units; `--dry-run` prints the plan without writing. The four agent subcommands
+reject `-C/--dir`, `--file`, and `--lock`.
 
 `narwhal up` is the existing local command and is not a cloud command. It keeps
 its current options and has no `--target`. `--target` is added only by the
@@ -2141,7 +2153,7 @@ separate `deploy` spec and is already present on the other cloud commands.
    waiting on an unverifiable status.
 `narwhal reconcile`:
 
-- Runs the same engine as `narwhald`. Intended for the user timer or an operator
+- Runs the same engine as `narwhal daemon`. Intended for the user timer or an operator
   on the host.
 - `--json` emits the signed status document produced by that cycle.
 - Exit `0` for success or no-op. Exit `5` for verification, replay, trust, or
@@ -2369,7 +2381,7 @@ publishes generation 6 from the active payload.
 
 ### A12. Timer fallback
 
-Given a host bootstrapped in `timer` mode with `narwhald.service` disabled,
+Given a host bootstrapped in `timer` mode with `narwhal.service` disabled,
 When the user timer fires and runs `narwhal reconcile`,
 Then the one-shot takes the lock, performs the same plan as the daemon would,
 publishes signed status with the same schema, and exits `0`. If a daemon run is
@@ -2494,7 +2506,7 @@ version 0.4.0 and a matching binary SHA-256,
 When the agent stages the new binary, swaps `current`, and restarts,
 Then the 0.4.0 agent writes `boot-ok` after a successful reconcile. When a
 deliberately broken 0.5.0 binary is published and fails to write `boot-ok`, the
-root-owned `narwhald-guard.timer` runs the stable `/usr/local/libexec/narwhal-guard`
+root-owned `narwhal-guard.timer` runs the stable `/usr/local/libexec/narwhal`
 copy, which takes the non-blocking `agent-upgrade.lock`, reverts `current` to
 0.4.0 without running the broken binary, writes the `reverted` marker without
 touching `state.json`, and then the agent resumes serving
@@ -2692,7 +2704,7 @@ All sources were accessed on 2026-11-24. Version-sensitive behavior can change.
   trust/<key_id>.pub    # pinned Ed25519 desired-signing public keys
   status-key            # per-host Ed25519 private key, mode 0600
   bootstrap-complete    # root-owned first-boot marker; not writable by narwhal
-  narwhald.stage        # root-owned guard install source, verified by --sha256
+  narwhal.stage        # root-owned guard install source, verified by --sha256
   do-token              # DigitalOcean only, owner narwhal, mode 0600, optional
 
 /var/lib/narwhal/
@@ -2703,7 +2715,7 @@ All sources were accessed on 2026-11-24. Version-sensitive behavior can change.
   artifacts/<payload-digest>.{json,sig.json,manifest.json}
   status-history/       # last 64 local status snapshots
   status-queue/
-  agent/<version>/narwhald
+  agent/<version>/narwhal
   agent/current -> agent/<version>
   agent/boot-ok
   agent/pending
@@ -2712,35 +2724,35 @@ All sources were accessed on 2026-11-24. Version-sensitive behavior can change.
 
 /srv/narwhal/           # only allowed root for absolute bind mounts
 
-/usr/local/libexec/narwhal-guard   # stable root-owned guard copy, never agent/current
-/etc/systemd/system/narwhald-guard.service
-/etc/systemd/system/narwhald-guard.timer
+/usr/local/libexec/narwhal   # stable root-owned guard copy, never agent/current
+/etc/systemd/system/narwhal-guard.service
+/etc/systemd/system/narwhal-guard.timer
 ```
 
 User units live under `~narwhal/.config/systemd/user/`. Bootstrap enables one
 of:
 
 ```text
-systemctl --user enable --now narwhald.service
-systemctl --user enable --now narwhald-reconcile.timer
+systemctl --user enable --now narwhal.service
+systemctl --user enable --now narwhal-reconcile.timer
 ```
 
 The first line is daemon mode. The second is timer mode. Both run as the
 `narwhal` user and both hold `/var/lib/narwhal/lock` during a reconcile.
 
 Bootstrap installs the root-owned guard units under `/etc/systemd/system/` and
-enables the timer. The service runs the stable `/usr/local/libexec/narwhal-guard`
+enables the timer. The service runs the stable `/usr/local/libexec/narwhal`
 copy as `User=narwhal`, never `agent/current`, so a broken agent cannot prevent
 the revert:
 
 ```text
-systemctl enable --now narwhald-guard.timer
+systemctl enable --now narwhal-guard.timer
 ```
 
-`narwhald install-guard --system --guard-binary <path> --sha256 <pin>` installs
+`narwhal install-guard --system --guard-binary <path> --sha256 <pin>` installs
 the stable guard copy and the root templates when run as root. It requires a
 root-owned, not group- or world-writable regular source and verifies the pin.
-`narwhald install-units --system-unit-dir /etc/systemd/system` writes only the
+`narwhal install-units --system-unit-dir /etc/systemd/system` writes only the
 templates. Both accept `--dry-run`, which validates and prints the plan without
 writing.
 
@@ -2748,7 +2760,7 @@ An unreadable `pending`, `reverted`, or `boot-ok` marker is renamed to
 `<marker>.corrupt.<timestamp>.<random>` and ignored, so a partial write cannot
 wedge the guard.
 
-`narwhald.service` (user unit):
+`narwhal.service` (user unit):
 
 ```ini
 [Unit]
@@ -2756,7 +2768,7 @@ Description=narwhal reconcile agent
 
 [Service]
 Type=simple
-ExecStart=/var/lib/narwhal/agent/current/narwhald --config /etc/narwhal/agent.toml
+ExecStart=/var/lib/narwhal/agent/current/narwhal daemon --config /etc/narwhal/agent.toml
 Restart=always
 RestartSec=5
 TimeoutStopSec=120
@@ -2777,12 +2789,12 @@ setuid `newuidmap`/`newgidmap` helpers. Verify the distribution's mechanism.
 User units do not order on the system `network-online.target`. The agent starts
 without network ordering and retries registry access with backoff.
 
-`narwhald-reconcile.service` is a user `Type=oneshot` unit with:
+`narwhal-reconcile.service` is a user `Type=oneshot` unit with:
 
 ```ini
 [Service]
 Type=oneshot
-ExecStart=/var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml
+ExecStart=/var/lib/narwhal/agent/current/narwhal reconcile --config /etc/narwhal/agent.toml
 KillMode=process
 Delegate=yes
 TimeoutStopSec=120
@@ -2795,7 +2807,7 @@ is deliberately not set: it would leave the unit active and prevent
 `OnUnitActiveSec` from starting the next reconcile. Timer mode leaves
 containers running between timer firings.
 
-`narwhald-reconcile.timer` is a user timer with:
+`narwhal-reconcile.timer` is a user timer with:
 
 ```ini
 [Timer]
@@ -2804,21 +2816,21 @@ OnUnitActiveSec=60s
 Persistent=true
 ```
 
-`narwhald-guard.service` is a root-owned system unit run as the `narwhal` user
+`narwhal-guard.service` is a root-owned system unit run as the `narwhal` user
 from the stable guard copy, not `agent/current`:
 
 ```ini
 [Unit]
 Description=narwhal agent upgrade guard
-ConditionPathExists=/usr/local/libexec/narwhal-guard
+ConditionPathExists=/usr/local/libexec/narwhal
 
 [Service]
 Type=oneshot
 User=narwhal
-ExecStart=/usr/local/libexec/narwhal-guard guard --config /etc/narwhal/agent.toml
+ExecStart=/usr/local/libexec/narwhal guard --config /etc/narwhal/agent.toml
 ```
 
-`narwhald-guard.timer` is a root-owned system timer:
+`narwhal-guard.timer` is a root-owned system timer:
 
 ```ini
 [Timer]

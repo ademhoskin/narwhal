@@ -81,7 +81,7 @@ variable "status_key_secret" {
 }
 
 variable "agent_image" {
-  description = "Registry reference of the narwhald agent image, without tag or digest."
+  description = "Registry reference of the narwhal agent image, without tag or digest."
   type        = string
 
   validation {
@@ -101,7 +101,7 @@ variable "agent_digest" {
 }
 
 variable "agent_binary_sha256" {
-  description = "SHA-256 of the narwhald binary extracted from the agent image, 64 lowercase hex characters."
+  description = "SHA-256 of the narwhal binary extracted from the agent image, 64 lowercase hex characters."
   type        = string
 
   validation {
@@ -111,7 +111,7 @@ variable "agent_binary_sha256" {
 }
 
 variable "agent_mode" {
-  description = "Agent runtime mode: daemon (narwhald.service) or timer (narwhald-reconcile.timer)."
+  description = "Agent runtime mode: daemon (narwhal.service) or timer (narwhal-reconcile.timer)."
   type        = string
   default     = "daemon"
 

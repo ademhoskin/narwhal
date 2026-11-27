@@ -8,7 +8,7 @@ namespace Narwhal.Tests;
 
 public class AgentUpgraderTests
 {
-    private const string Repository = "registry.example.com/shop/narwhald";
+    private const string Repository = "registry.example.com/shop/narwhal";
     private static readonly byte[] OldBinary = Encoding.UTF8.GetBytes("agent 0.3.0");
     private static readonly byte[] NewBinary = Encoding.UTF8.GetBytes("agent 0.4.0");
 
@@ -25,8 +25,8 @@ public class AgentUpgraderTests
 
         Assert.Equal(AgentUpgradeAction.Staged, result.Action);
         Assert.Equal("0.4.0", CurrentTarget(state));
-        Assert.True(File.Exists(Path.Combine(state, "agent", "0.4.0", "narwhald")));
-        Assert.Equal(NewBinary, File.ReadAllBytes(Path.Combine(state, "agent", "0.4.0", "narwhald")));
+        Assert.True(File.Exists(Path.Combine(state, "agent", "0.4.0", "narwhal")));
+        Assert.Equal(NewBinary, File.ReadAllBytes(Path.Combine(state, "agent", "0.4.0", "narwhal")));
         Assert.True(File.Exists(Path.Combine(state, "agent", "pending")));
         Assert.False(File.Exists(Path.Combine(state, "agent", "boot-ok")));
     }
@@ -49,7 +49,7 @@ public class AgentUpgraderTests
         Assert.NotNull(reverted);
         Assert.Equal(spec.BinarySha256, reverted!.BinarySha256);
         Assert.False(File.Exists(Path.Combine(state, "agent", "pending")));
-        Assert.False(File.Exists(Path.Combine(state, "agent", "0.4.0", "narwhald")));
+        Assert.False(File.Exists(Path.Combine(state, "agent", "0.4.0", "narwhal")));
     }
 
     [Fact]
@@ -206,7 +206,7 @@ public class AgentUpgraderTests
 
         Assert.Equal("0.3.0", CurrentTarget(state));
         Assert.False(File.Exists(Path.Combine(agent, "pending")));
-        Assert.False(File.Exists(Path.Combine(agent, "elsewhere", "narwhald")));
+        Assert.False(File.Exists(Path.Combine(agent, "elsewhere", "narwhal")));
     }
 
     [Fact]
@@ -216,7 +216,7 @@ public class AgentUpgraderTests
         InstallCurrent(state, "0.3.0", OldBinary);
         var agent = Path.Combine(state, "agent");
         Directory.CreateDirectory(Path.Combine(agent, "0.4.0"));
-        File.CreateSymbolicLink(Path.Combine(agent, "0.4.0", "narwhald"), Path.Combine(agent, "0.3.0", "narwhald"));
+        File.CreateSymbolicLink(Path.Combine(agent, "0.4.0", "narwhal"), Path.Combine(agent, "0.3.0", "narwhal"));
         var upgrader = CreateUpgrader(state, new FakeSource(NewBinary));
 
         await Assert.ThrowsAsync<AgentConfigException>(() =>
@@ -263,7 +263,7 @@ public class AgentUpgraderTests
         Assert.Equal(AgentUpgradeAction.Failed, result.Action);
         Assert.True(result.DigestBlocked);
         Assert.Equal("0.4.0", CurrentTarget(state));
-        Assert.Equal(OldBinary, File.ReadAllBytes(Path.Combine(state, "agent", "0.4.0", "narwhald")));
+        Assert.Equal(OldBinary, File.ReadAllBytes(Path.Combine(state, "agent", "0.4.0", "narwhal")));
     }
 
     [Fact]
@@ -707,7 +707,7 @@ public class AgentUpgraderTests
     {
         var directory = Path.Combine(state, "agent", version);
         Directory.CreateDirectory(directory);
-        File.WriteAllBytes(Path.Combine(directory, "narwhald"), binary);
+        File.WriteAllBytes(Path.Combine(directory, "narwhal"), binary);
         var link = Path.Combine(state, "agent", "current");
         if (File.Exists(link))
             File.Delete(link);

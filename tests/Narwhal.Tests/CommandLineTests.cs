@@ -127,4 +127,28 @@ public class CommandLineTests
         var error = Assert.Throws<UsageException>(() => CommandLine.Parse(["plan", "--system", "x86_64-linux"]));
         Assert.Contains("unknown option '--system'", error.Message);
     }
+
+    [Fact]
+    public void HelpListsTheAgentSubcommands()
+    {
+        var usage = CommandLine.Usage();
+
+        Assert.Contains("  daemon ", usage, StringComparison.Ordinal);
+        Assert.Contains("  guard ", usage, StringComparison.Ordinal);
+        Assert.Contains("  install-units ", usage, StringComparison.Ordinal);
+        Assert.Contains("  install-guard ", usage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DaemonHelpIsAvailable()
+    {
+        var options = CommandLine.Parse(["daemon", "--help"]);
+
+        Assert.True(options.Help);
+        Assert.Equal("daemon", options.Command);
+        Assert.Contains(
+            "narwhal daemon",
+            CommandLine.Usage(CommandLine.Find(options.Command)!),
+            StringComparison.Ordinal);
+    }
 }

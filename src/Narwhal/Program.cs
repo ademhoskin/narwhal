@@ -18,8 +18,11 @@ public static class App
     {
         Console.OutputEncoding = Encoding.UTF8;
 
-        if (NarwhaldCommand.IsNarwhaldInvocation(Environment.ProcessPath))
-            return await RunNarwhaldAsync(args);
+        if (args.Length == 0)
+        {
+            Console.Out.WriteLine(CommandLine.Usage());
+            return 0;
+        }
 
         // `narwhal help [command]` is handled before parsing so it never needs a manifest.
         if (args.Length > 0 && args[0] == "help")
@@ -54,9 +57,18 @@ public static class App
             return 0;
         }
 
+        using var sigterm = !OperatingSystem.IsWindows() && RegistersSigterm(options.Command)
+            ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+            {
+                context.Cancel = true;
+                cancellation.Cancel();
+            })
+            : null;
+
         try
         {
-            return await DispatchAsync(options, cancellation.Token);
+            RejectManifestOptionsForAgentCommand(options);
+            return await DispatchAsync(options, args, cancellation.Token);
         }
         catch (UsageException e)
         {
@@ -105,27 +117,30 @@ public static class App
         }
     }
 
-    private static async Task<int> RunNarwhaldAsync(string[] args)
+    private static bool IsAgentCommand(string command) =>
+        command is "daemon" or "guard" or "install-units" or "install-guard";
+
+    internal static bool RegistersSigterm(string command) =>
+        command is "reconcile" || IsAgentCommand(command);
+
+    private static void RejectManifestOptionsForAgentCommand(CliOptions options)
     {
-        using var cancellation = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            cancellation.Cancel();
-        };
-
-        using var sigterm = OperatingSystem.IsWindows()
-            ? null
-            : PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
-            {
-                context.Cancel = true;
-                cancellation.Cancel();
-            });
-
-        return await NarwhaldCommand.RunAsync(args, cancellation.Token);
+        if (!IsAgentCommand(options.Command))
+            return;
+        if (options.Directory is not null)
+            throw new UsageException($"option '--dir' is not valid for '{options.Command}'");
+        if (options.File is not null)
+            throw new UsageException($"option '--file' is not valid for '{options.Command}'");
+        if (options.LockPath is not null)
+            throw new UsageException($"option '--lock' is not valid for '{options.Command}'");
+        if (options.Quiet)
+            throw new UsageException($"option '--quiet' is not valid for '{options.Command}'");
     }
 
-    private static async Task<int> DispatchAsync(CliOptions options, CancellationToken cancellationToken)
+    private static async Task<int> DispatchAsync(
+        CliOptions options,
+        string[] args,
+        CancellationToken cancellationToken)
     {
         var reporter = new Reporter(options.Json, options.Verbose, options.NoColor ? false : null);
 
@@ -140,6 +155,11 @@ public static class App
                 return await ReconcileCommand.RunAsync(options, reporter, cancellationToken);
             case "status":
                 return await StatusCommand.RunAsync(options, reporter, cancellationToken);
+            case "daemon":
+            case "guard":
+            case "install-units":
+            case "install-guard":
+                return await AgentCommands.RunAsync(args, cancellationToken);
         }
 
         var context = CommandContext.Create(options);

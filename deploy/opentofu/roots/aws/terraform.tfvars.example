@@ -20,7 +20,7 @@ status_keys = {
 # Existing SSM SecureString parameter holding the per-host Ed25519 status key.
 status_key_secret = "arn:aws:ssm:us-east-1:111122223333:parameter/narwhal/example/prod/status-key"
 
-agent_image         = "111122223333.dkr.ecr.us-east-1.amazonaws.com/example/narwhald"
+agent_image         = "111122223333.dkr.ecr.us-east-1.amazonaws.com/example/narwhal"
 agent_digest        = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 agent_binary_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 agent_mode          = "daemon"

@@ -50,7 +50,7 @@ public static class DaemonBackoff
 }
 
 /// <summary>
-/// The narwhald poll loop. The lock is held for exactly one cycle and released before the
+/// The agent daemon poll loop. The lock is held for exactly one cycle and released before the
 /// interval, so a one-shot invocation can run between polls.
 /// </summary>
 public sealed class DaemonRunner
@@ -140,7 +140,7 @@ public sealed class DaemonRunner
             }
         }
 
-        _reporter.Info("narwhald stopped");
+        _reporter.Info("narwhal daemon stopped");
         return 0;
     }
 }

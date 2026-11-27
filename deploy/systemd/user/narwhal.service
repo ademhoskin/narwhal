@@ -3,7 +3,7 @@ Description=narwhal reconcile agent
 
 [Service]
 Type=simple
-ExecStart=/var/lib/narwhal/agent/current/narwhald --config /etc/narwhal/agent.toml
+ExecStart=/var/lib/narwhal/agent/current/narwhal daemon --config /etc/narwhal/agent.toml
 Restart=always
 RestartSec=5
 TimeoutStopSec=120

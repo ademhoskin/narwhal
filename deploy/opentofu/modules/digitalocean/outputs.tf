@@ -36,7 +36,7 @@ output "registry_repositories" {
   description = "Registry-relative repository names for images, desired state, and status. DOCR creates repositories on first push."
   value = {
     images = {
-      for name in toset(concat(["narwhald"], var.service_images)) :
+      for name in toset(concat(["narwhal"], var.service_images)) :
       name => "${local.image_registry}/${var.project}/${name}"
     }
     desired = "${local.state_registry}/${local.desired_repo_name}"

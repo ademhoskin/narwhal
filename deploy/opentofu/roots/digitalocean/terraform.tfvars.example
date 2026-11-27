@@ -29,7 +29,7 @@ state_registry = "ghcr.io"
 state_registry_credential_secret_name = "narwhal-example-prod-state-registry"
 allow_docr_state_registry = false
 
-agent_image         = "registry.digitalocean.com/example/narwhald"
+agent_image         = "registry.digitalocean.com/example/narwhal"
 agent_digest        = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 agent_binary_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 agent_mode          = "daemon"

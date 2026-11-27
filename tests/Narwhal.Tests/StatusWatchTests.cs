@@ -98,19 +98,8 @@ public class StatusWatchTests
     }
 }
 
-public class NarwhaldCommandTests
+public class AgentCommandTests
 {
-    [Theory]
-    [InlineData("/var/lib/narwhal/agent/current/narwhald", true)]
-    [InlineData("/usr/local/libexec/narwhal-guard", true)]
-    [InlineData("/usr/local/bin/narwhal", false)]
-    [InlineData("narwhald", true)]
-    [InlineData(null, false)]
-    public void DetectsTheNarwhaldInvocationName(string? processPath, bool expected)
-    {
-        Assert.Equal(expected, NarwhaldCommand.IsNarwhaldInvocation(processPath));
-    }
-
     [Fact]
     public async Task InstallUnitsDryRunWritesNothing()
     {
@@ -118,7 +107,7 @@ public class NarwhaldCommandTests
         var configPath = WriteConfig(directory, "daemon");
         var unitDirectory = Path.Combine(directory, "units");
 
-        var exit = await NarwhaldCommand.RunAsync(
+        var exit = await AgentCommands.RunAsync(
             ["install-units", "--config", configPath, "--unit-dir", unitDirectory, "--dry-run"],
             CancellationToken.None);
 
@@ -134,7 +123,7 @@ public class NarwhaldCommandTests
         var unitDirectory = Path.Combine(directory, "units");
         var systemUnitDirectory = Path.Combine(directory, "system-units");
 
-        var exit = await NarwhaldCommand.RunAsync(
+        var exit = await AgentCommands.RunAsync(
             [
                 "install-units",
                 "--config", configPath,
@@ -156,7 +145,7 @@ public class NarwhaldCommandTests
         var configPath = WriteConfig(directory, "daemon");
         var agent = StageHungAgent(directory);
 
-        var exit = await NarwhaldCommand.RunAsync(["guard", "--config", configPath], CancellationToken.None);
+        var exit = await AgentCommands.RunAsync(["guard", "--config", configPath], CancellationToken.None);
 
         Assert.Equal(0, exit);
         Assert.Equal("0.3.0", new FileInfo(Path.Combine(agent, "current")).LinkTarget);
@@ -164,7 +153,7 @@ public class NarwhaldCommandTests
         Assert.True(File.Exists(Path.Combine(agent, "reverted")));
         Assert.False(File.Exists(Path.Combine(directory, "state.json")));
 
-        var second = await NarwhaldCommand.RunAsync(["guard", "--config", configPath], CancellationToken.None);
+        var second = await AgentCommands.RunAsync(["guard", "--config", configPath], CancellationToken.None);
         Assert.Equal(0, second);
         Assert.Equal("0.3.0", new FileInfo(Path.Combine(agent, "current")).LinkTarget);
     }
@@ -181,7 +170,7 @@ public class NarwhaldCommandTests
             CancellationToken.None);
         Assert.NotNull(held);
 
-        var exit = await NarwhaldCommand.RunAsync(["guard", "--config", configPath], CancellationToken.None);
+        var exit = await AgentCommands.RunAsync(["guard", "--config", configPath], CancellationToken.None);
 
         Assert.Equal(0, exit);
         Assert.Equal("0.3.0", new FileInfo(Path.Combine(agent, "current")).LinkTarget);
@@ -199,13 +188,13 @@ public class NarwhaldCommandTests
                    TimeSpan.Zero,
                    CancellationToken.None))
         {
-            var skipped = await NarwhaldCommand.RunAsync(["guard", "--config", configPath], CancellationToken.None);
+            var skipped = await AgentCommands.RunAsync(["guard", "--config", configPath], CancellationToken.None);
             Assert.Equal(0, skipped);
             Assert.Equal("0.4.0", new FileInfo(Path.Combine(agent, "current")).LinkTarget);
             Assert.True(File.Exists(Path.Combine(agent, "pending")));
         }
 
-        var exit = await NarwhaldCommand.RunAsync(["guard", "--config", configPath], CancellationToken.None);
+        var exit = await AgentCommands.RunAsync(["guard", "--config", configPath], CancellationToken.None);
 
         Assert.Equal(0, exit);
         Assert.Equal("0.3.0", new FileInfo(Path.Combine(agent, "current")).LinkTarget);
@@ -215,12 +204,12 @@ public class NarwhaldCommandTests
     public async Task InstallGuardDryRunWritesNothing()
     {
         var directory = DaemonRunnerTests.TestDirectory();
-        var binary = Path.Combine(directory, "narwhal-guard");
+        var binary = Path.Combine(directory, "narwhal");
         var unitDirectory = Path.Combine(directory, "system-units");
         File.WriteAllText(binary, "guard");
         var pin = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(binary)));
 
-        var exit = await NarwhaldCommand.RunAsync(
+        var exit = await AgentCommands.RunAsync(
             [
                 "install-guard",
                 "--system",
@@ -238,15 +227,15 @@ public class NarwhaldCommandTests
     [Fact]
     public async Task InstallGuardRequiresSystemBinaryAndPin()
     {
-        Assert.Equal(1, await NarwhaldCommand.RunAsync(["install-guard", "--dry-run"], CancellationToken.None));
+        Assert.Equal(1, await AgentCommands.RunAsync(["install-guard", "--dry-run"], CancellationToken.None));
         Assert.Equal(
             1,
-            await NarwhaldCommand.RunAsync(
+            await AgentCommands.RunAsync(
                 ["install-guard", "--system", "--dry-run"],
                 CancellationToken.None));
         Assert.Equal(
             1,
-            await NarwhaldCommand.RunAsync(
+            await AgentCommands.RunAsync(
                 ["install-guard", "--system", "--guard-binary", "/dev/null", "--dry-run"],
                 CancellationToken.None));
     }
@@ -258,12 +247,12 @@ public class NarwhaldCommandTests
             return;
 
         var directory = DaemonRunnerTests.TestDirectory();
-        var binary = Path.Combine(directory, "narwhal-guard");
+        var binary = Path.Combine(directory, "narwhal");
         var unitDirectory = Path.Combine(directory, "system-units");
         File.WriteAllText(binary, "guard");
         var pin = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(binary)));
 
-        var exit = await NarwhaldCommand.RunAsync(
+        var exit = await AgentCommands.RunAsync(
             [
                 "install-guard",
                 "--system",
@@ -286,7 +275,7 @@ public class NarwhaldCommandTests
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
-        var exit = await NarwhaldCommand.RunAsync(["--config", configPath], cancellation.Token);
+        var exit = await AgentCommands.RunAsync(["daemon", "--config", configPath], cancellation.Token);
 
         Assert.Equal(0, exit);
     }
@@ -296,8 +285,8 @@ public class NarwhaldCommandTests
         var agent = Path.Combine(directory, "agent");
         Directory.CreateDirectory(Path.Combine(agent, "0.3.0"));
         Directory.CreateDirectory(Path.Combine(agent, "0.4.0"));
-        File.WriteAllText(Path.Combine(agent, "0.3.0", "narwhald"), "old");
-        File.WriteAllText(Path.Combine(agent, "0.4.0", "narwhald"), "hung");
+        File.WriteAllText(Path.Combine(agent, "0.3.0", "narwhal"), "old");
+        File.WriteAllText(Path.Combine(agent, "0.4.0", "narwhal"), "hung");
         File.CreateSymbolicLink(Path.Combine(agent, "current"), "0.4.0");
         var started = DateTimeOffset.UtcNow.AddMinutes(-20).UtcDateTime
             .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
@@ -323,17 +312,16 @@ public class NarwhaldCommandTests
         var configPath = WriteConfig(directory, "timer");
         ReconcileTestData.CreateBootPins(directory);
 
-        var exit = await NarwhaldCommand.RunAsync(["--config", configPath], CancellationToken.None);
+        var exit = await AgentCommands.RunAsync(["daemon", "--config", configPath], CancellationToken.None);
 
         Assert.Equal(1, exit);
     }
 
     [Fact]
-    public async Task RejectsDryRunOutsideInstallUnits()
+    public void RejectsDryRunOutsideInstallCommands()
     {
-        var exit = await NarwhaldCommand.RunAsync(["reconcile", "--dry-run"], CancellationToken.None);
-
-        Assert.Equal(1, exit);
+        var error = Assert.Throws<UsageException>(() => CommandLine.Parse(["reconcile", "--dry-run"]));
+        Assert.Contains("unknown option '--dry-run'", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -341,7 +329,7 @@ public class NarwhaldCommandTests
     {
         var missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("n"), "agent.toml");
 
-        var exit = await NarwhaldCommand.RunAsync(["--config", missing], CancellationToken.None);
+        var exit = await AgentCommands.RunAsync(["daemon", "--config", missing], CancellationToken.None);
 
         Assert.Equal(1, exit);
     }

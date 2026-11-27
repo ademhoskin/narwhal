@@ -3,7 +3,7 @@ Description=narwhal reconcile one-shot
 
 [Service]
 Type=oneshot
-ExecStart=/var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml
+ExecStart=/var/lib/narwhal/agent/current/narwhal reconcile --config /etc/narwhal/agent.toml
 KillMode=process
 Delegate=yes
 TimeoutStopSec=120

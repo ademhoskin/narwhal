@@ -2,27 +2,19 @@ using Narwhal.Cli;
 
 namespace Narwhal.Reconcile;
 
-/// <summary>
-/// The <c>narwhald</c> entrypoint. The published <c>narwhald</c> is the same binary as
-/// <c>narwhal</c>; it selects this dispatcher from the executable name.
-/// </summary>
-public static class NarwhaldCommand
+/// <summary>The agent subcommands: <c>narwhal daemon</c>, <c>guard</c>, and the installers.</summary>
+public static class AgentCommands
 {
     private const string UsageText =
         """
-        narwhald - narwhal reconcile agent
+        narwhal agent commands
 
         usage:
-          narwhald [--config <path>] [--json] [-v] [--no-color]
-          narwhald reconcile [--config <path>] [--json]
-          narwhald guard [--config <path>]
-          narwhald install-units [--config <path>] [--unit-dir <path>] [--system-unit-dir <path>] [--dry-run]
-          narwhald install-guard --system --guard-binary <path> --sha256 <pin> [--system-unit-dir <path>] [--dry-run]
+          narwhal daemon [--config <path>] [--json] [-v] [--no-color]
+          narwhal guard [--config <path>]
+          narwhal install-units [--config <path>] [--unit-dir <path>] [--system-unit-dir <path>] [--dry-run]
+          narwhal install-guard --system --guard-binary <path> --sha256 <pin> [--system-unit-dir <path>] [--dry-run]
         """;
-
-    public static bool IsNarwhaldInvocation(string? processPath) =>
-        processPath is not null &&
-        Path.GetFileNameWithoutExtension(processPath) is "narwhald" or "narwhal-guard";
 
     public static async Task<int> RunAsync(string[] args, CancellationToken cancellationToken)
     {
@@ -53,7 +45,6 @@ public static class NarwhaldCommand
             var config = AgentConfigLoader.Load(invocation.ConfigPath);
             return invocation.Command switch
             {
-                "reconcile" => await RunReconcileAsync(config, invocation, reporter, cancellationToken),
                 "guard" => await RunGuardAsync(config, reporter, cancellationToken),
                 "install-units" => await RunInstallUnitsAsync(config, invocation, reporter, cancellationToken),
                 _ => await RunDaemonAsync(config, invocation, reporter, cancellationToken),
@@ -61,7 +52,7 @@ public static class NarwhaldCommand
         }
         catch (OperationCanceledException)
         {
-            return invocation.Command == "reconcile" ? 130 : 0;
+            return 0;
         }
         catch (AgentConfigException e)
         {
@@ -90,7 +81,7 @@ public static class NarwhaldCommand
 
         if (!string.Equals(config.Mode, "daemon", StringComparison.Ordinal))
         {
-            reporter.Error($"agent mode is '{config.Mode}'; the timer runs narwhald reconcile instead");
+            reporter.Error($"agent mode is '{config.Mode}'; the timer runs narwhal reconcile instead");
             return 1;
         }
 
@@ -144,17 +135,6 @@ public static class NarwhaldCommand
             reporter.Error(e.Message);
             return new DaemonCycleResult(ReconcileExitCode.Config, ReconcilePhases.Failed);
         }
-    }
-
-    private static async Task<int> RunReconcileAsync(
-        AgentConfig config,
-        Invocation invocation,
-        Reporter reporter,
-        CancellationToken cancellationToken)
-    {
-        var options = new CliOptions { Command = "reconcile", Json = invocation.Json, Verbose = invocation.Verbose };
-        options.Values["config"] = invocation.ConfigPath;
-        return await ReconcileCommand.RunAsync(options, reporter, cancellationToken);
     }
 
     /// <summary>
@@ -329,7 +309,7 @@ public static class NarwhaldCommand
             if (commandSeen)
                 throw new UsageException($"unexpected argument '{token}'\n\n{UsageText}");
 
-            if (token is not ("reconcile" or "guard" or "install-units" or "install-guard"))
+            if (token is not ("daemon" or "guard" or "install-units" or "install-guard"))
                 throw new UsageException($"unknown command '{token}'\n\n{UsageText}");
 
             command = token;

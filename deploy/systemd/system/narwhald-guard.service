@@ -1,8 +1,0 @@
-[Unit]
-Description=narwhal agent upgrade guard
-ConditionPathExists=/usr/local/libexec/narwhal-guard
-
-[Service]
-Type=oneshot
-User=narwhal
-ExecStart=/usr/local/libexec/narwhal-guard guard --config /etc/narwhal/agent.toml

@@ -106,7 +106,7 @@ public sealed class DeploySpec
     public int? WaitSeconds { get; init; }
 }
 
-/// <summary>An optional narwhald upgrade authorization.</summary>
+/// <summary>An optional agent upgrade authorization.</summary>
 public sealed class AgentSpec
 {
     public required string Version { get; init; }

@@ -60,9 +60,9 @@ public interface IAgentImageSource
 }
 
 /// <summary>
-/// Selects the narwhald layer from an OCI agent image. A raw binary layer uses
+/// Selects the narwhal layer from an OCI agent image. A raw binary layer uses
 /// <c>application/vnd.narwhal.agent.binary.v1+octet-stream</c>; tar and gzip layers extract the
-/// first regular file named <c>narwhald</c>.
+/// first regular file named <c>narwhal</c>.
 /// </summary>
 public sealed class RegistryAgentImageSource(IRegistryClient registry) : IAgentImageSource
 {
@@ -122,14 +122,14 @@ public sealed class RegistryAgentImageSource(IRegistryClient registry) : IAgentI
         if (candidate is null)
             throw new CloudArtifactException(
                 CloudArtifactErrorCodes.LayerInvalid,
-                "agent image has no narwhald binary");
+                "agent image has no narwhal binary");
         return candidate;
     }
 
     private static CloudArtifactException DuplicateBinary() =>
         new(
             CloudArtifactErrorCodes.LayerInvalid,
-            "agent image has more than one narwhald binary");
+            "agent image has more than one narwhal binary");
 
     private static bool IsGzip(string? mediaType, ReadOnlySpan<byte> blob) =>
         mediaType is TarGzipMediaType or "application/vnd.oci.image.layer.v1.tar+gzip"
@@ -161,14 +161,14 @@ public sealed class RegistryAgentImageSource(IRegistryClient registry) : IAgentI
         {
             if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile))
                 continue;
-            if (!string.Equals(Path.GetFileName(entry.Name), "narwhald", StringComparison.Ordinal))
+            if (!string.Equals(Path.GetFileName(entry.Name), "narwhal", StringComparison.Ordinal))
                 continue;
             if (entry.DataStream is null)
                 continue;
             if (binary is not null)
                 throw new CloudArtifactException(
                     CloudArtifactErrorCodes.LayerInvalid,
-                    "agent layer contains more than one narwhald binary");
+                    "agent layer contains more than one narwhal binary");
 
             using var output = new MemoryStream();
             var buffer = new byte[81920];
@@ -193,7 +193,7 @@ public sealed class RegistryAgentImageSource(IRegistryClient registry) : IAgentI
 /// Stages signed agent upgrades under <c>agent/</c> and implements the boot-ok revert guard.
 /// </summary>
 /// <remarks>
-/// The guard runs when narwhald starts. It reverts to the previous version when a staged version
+/// The guard runs when the daemon starts. It reverts to the previous version when a staged version
 /// has not written <c>agent/boot-ok</c> after more than three starts or ten minutes.
 /// </remarks>
 public sealed class AgentUpgrader
@@ -243,7 +243,7 @@ public sealed class AgentUpgrader
     {
         ValidateVersion(version);
         EnsureNotSymlink(Path.Combine(_agentDirectory, version));
-        var path = Path.GetFullPath(Path.Combine(_agentDirectory, version, "narwhald"));
+        var path = Path.GetFullPath(Path.Combine(_agentDirectory, version, "narwhal"));
         EnsureContained(path);
         EnsureNotSymlink(path);
         return path;
@@ -644,7 +644,7 @@ public sealed class AgentUpgrader
         var directory = Path.Combine(_agentDirectory, version);
         Directory.CreateDirectory(directory);
         var target = VersionBinary(version);
-        var temporary = Path.Combine(directory, "narwhald." + Guid.NewGuid().ToString("n") + ".tmp");
+        var temporary = Path.Combine(directory, "narwhal." + Guid.NewGuid().ToString("n") + ".tmp");
 
         try
         {

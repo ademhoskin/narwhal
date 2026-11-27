@@ -121,7 +121,7 @@ state backend must be protected as a secret store and never committed.
   is never read by OpenTofu. This is the documented fallback in 4.5: generating
   it in OpenTofu would leave the private key in state. Store it with a pinned
   operator tool before applying.
-- Registries: AWS creates mutable-tag ECR repositories for `narwhald`, every
+- Registries: AWS creates mutable-tag ECR repositories for `narwhal`, every
   `service_images` entry, desired state, and status. GCP creates three Artifact
   Registry repositories (images, desired, status) so status writes cannot touch
   desired state. DigitalOcean creates DOCR for images and requires a

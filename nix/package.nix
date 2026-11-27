@@ -67,15 +67,10 @@ buildDotnetModule {
       -p:PublishAot=true \
       -o "$out/lib/narwhal"
 
-    # narwhald and narwhal-guard are the same binary; the code picks its mode
-    # from the basename of /proc/self/exe, so the raw copies keep those names.
-    for name in narwhal narwhald narwhal-guard; do
-      if [ "$name" != narwhal ]; then
-        ln -f "$out/lib/narwhal/narwhal" "$out/lib/narwhal/$name"
-      fi
-      makeWrapper "$out/lib/narwhal/$name" "$out/bin/$name" \
-        --prefix PATH : ${lib.makeBinPath [ oras ]}
-    done
+    # The agent stages the raw binary and needs oras on PATH itself; the
+    # wrapper here is for host CLI use.
+    makeWrapper "$out/lib/narwhal/narwhal" "$out/bin/narwhal" \
+      --prefix PATH : ${lib.makeBinPath [ oras ]}
 
     runHook postInstall
   '';

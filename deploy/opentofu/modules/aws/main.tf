@@ -140,6 +140,6 @@ resource "aws_ssm_association" "reconcile" {
   }
 
   parameters = {
-    commands = "runuser -u narwhal -- env XDG_RUNTIME_DIR=/run/user/$(id -u narwhal) /var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml"
+    commands = "runuser -u narwhal -- env XDG_RUNTIME_DIR=/run/user/$(id -u narwhal) /var/lib/narwhal/agent/current/narwhal reconcile --config /etc/narwhal/agent.toml"
   }
 }

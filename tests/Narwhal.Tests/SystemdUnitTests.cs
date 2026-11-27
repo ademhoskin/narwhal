@@ -9,11 +9,11 @@ public class SystemdUnitTests
     public void RepoTemplatesMatchAppendixA()
     {
         var root = RepoRoot();
-        var daemon = File.ReadAllText(Path.Combine(root, "deploy", "systemd", "user", "narwhald.service"));
-        var reconcile = File.ReadAllText(Path.Combine(root, "deploy", "systemd", "user", "narwhald-reconcile.service"));
-        var timer = File.ReadAllText(Path.Combine(root, "deploy", "systemd", "user", "narwhald-reconcile.timer"));
+        var daemon = File.ReadAllText(Path.Combine(root, "deploy", "systemd", "user", "narwhal.service"));
+        var reconcile = File.ReadAllText(Path.Combine(root, "deploy", "systemd", "user", "narwhal-reconcile.service"));
+        var timer = File.ReadAllText(Path.Combine(root, "deploy", "systemd", "user", "narwhal-reconcile.timer"));
 
-        Assert.Contains("ExecStart=/var/lib/narwhal/agent/current/narwhald --config /etc/narwhal/agent.toml", daemon, StringComparison.Ordinal);
+        Assert.Contains("ExecStart=/var/lib/narwhal/agent/current/narwhal daemon --config /etc/narwhal/agent.toml", daemon, StringComparison.Ordinal);
         Assert.Contains("Type=simple", daemon, StringComparison.Ordinal);
         Assert.Contains("Restart=always", daemon, StringComparison.Ordinal);
         Assert.Contains("RestartSec=5", daemon, StringComparison.Ordinal);
@@ -25,7 +25,7 @@ public class SystemdUnitTests
 
         Assert.Contains("Type=oneshot", reconcile, StringComparison.Ordinal);
         Assert.Contains(
-            "ExecStart=/var/lib/narwhal/agent/current/narwhald reconcile --config /etc/narwhal/agent.toml",
+            "ExecStart=/var/lib/narwhal/agent/current/narwhal reconcile --config /etc/narwhal/agent.toml",
             reconcile,
             StringComparison.Ordinal);
         Assert.DoesNotContain("RemainAfterExit", reconcile, StringComparison.Ordinal);
@@ -59,6 +59,48 @@ public class SystemdUnitTests
         }
     }
 
+    [Theory]
+    [InlineData(SystemdUnitTemplates.DaemonUnit)]
+    [InlineData(SystemdUnitTemplates.ReconcileService)]
+    public void RejectsAUnitWithoutItsSubcommand(string name)
+    {
+        var content = "[Service]\nExecStart=/var/lib/narwhal/agent/current/narwhal --config /etc/narwhal/agent.toml\n";
+
+        Assert.Throws<AgentConfigException>(() =>
+            SystemdUnitTemplates.Validate(new SystemdUnitTemplate(name, content)));
+    }
+
+    [Theory]
+    [InlineData(SystemdUnitTemplates.DaemonUnit, "daemon")]
+    [InlineData(SystemdUnitTemplates.ReconcileService, "reconcile")]
+    public void AcceptsAnExecStartSubcommandAtEndOfLine(string name, string subcommand)
+    {
+        var content = $"[Service]\nExecStart=/var/lib/narwhal/agent/current/narwhal {subcommand}";
+
+        SystemdUnitTemplates.Validate(new SystemdUnitTemplate(name, content));
+    }
+
+    [Theory]
+    [InlineData(SystemdUnitTemplates.DaemonUnit, "daemon")]
+    [InlineData(SystemdUnitTemplates.ReconcileService, "reconcile")]
+    public void AcceptsAnExecStartSubcommandFollowedByTab(string name, string subcommand)
+    {
+        var content = $"[Service]\nExecStart=/var/lib/narwhal/agent/current/narwhal {subcommand}\t--config /etc/narwhal/agent.toml";
+
+        SystemdUnitTemplates.Validate(new SystemdUnitTemplate(name, content));
+    }
+
+    [Theory]
+    [InlineData(SystemdUnitTemplates.DaemonUnit, "daemon")]
+    [InlineData(SystemdUnitTemplates.ReconcileService, "reconcile")]
+    public void RejectsAnExecStartWithASubcommandPrefix(string name, string subcommand)
+    {
+        var content = $"[Service]\nExecStart=/var/lib/narwhal/agent/current/narwhal {subcommand}x --config /etc/narwhal/agent.toml";
+
+        Assert.Throws<AgentConfigException>(() =>
+            SystemdUnitTemplates.Validate(new SystemdUnitTemplate(name, content)));
+    }
+
     [Fact]
     public void GuardTemplatesUseTheStableBinaryAndRunAsNarwhal()
     {
@@ -72,13 +114,13 @@ public class SystemdUnitTests
         var service = SystemdUnitTemplates.Load(SystemdUnitTemplates.GuardService);
         Assert.Contains("User=narwhal", service, StringComparison.Ordinal);
         Assert.Contains(
-            "ExecStart=/usr/local/libexec/narwhal-guard guard --config /etc/narwhal/agent.toml",
+            "ExecStart=/usr/local/libexec/narwhal guard --config /etc/narwhal/agent.toml",
             service,
             StringComparison.Ordinal);
         Assert.DoesNotContain("/var/lib/narwhal/agent/current", service, StringComparison.Ordinal);
         Assert.DoesNotContain("ListenStream", service, StringComparison.Ordinal);
         Assert.Contains(
-            "ConditionPathExists=/usr/local/libexec/narwhal-guard",
+            "ConditionPathExists=/usr/local/libexec/narwhal",
             service,
             StringComparison.Ordinal);
         SystemdUnitTemplates.ValidateGuard(new SystemdUnitTemplate(SystemdUnitTemplates.GuardService, service));
@@ -105,29 +147,82 @@ public class SystemdUnitTests
     }
 
     [Fact]
+    public void RemovesTheLegacyGuardBinary()
+    {
+        var directory = DaemonRunnerTests.TestDirectory();
+        var legacy = Path.Combine(directory, "narwhal-guard");
+        File.WriteAllText(legacy, "guard");
+        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
+
+        Assert.True(GuardInstaller.RemoveLegacyBinary(legacy, dryRun: false, reporter));
+        Assert.False(File.Exists(legacy));
+    }
+
+    [Fact]
+    public void GuardBinaryPathsArePinnedAndDistinct()
+    {
+        Assert.Equal("/usr/local/libexec/narwhal", GuardInstaller.GuardBinaryPath);
+        Assert.Equal("/usr/local/libexec/narwhal-guard", GuardInstaller.LegacyGuardBinaryPath);
+        Assert.NotEqual(GuardInstaller.GuardBinaryPath, GuardInstaller.LegacyGuardBinaryPath);
+    }
+
+    [Fact]
+    public void RefusesToRemoveTheStableGuardBinary()
+    {
+        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
+
+        Assert.Throws<AgentConfigException>(() =>
+            GuardInstaller.RemoveLegacyBinary(GuardInstaller.GuardBinaryPath, dryRun: false, reporter));
+    }
+
+    [Fact]
+    public void RemovesADanglingLegacyGuardSymlink()
+    {
+        var directory = DaemonRunnerTests.TestDirectory();
+        var legacy = Path.Combine(directory, "narwhal-guard");
+        File.CreateSymbolicLink(legacy, Path.Combine(directory, "missing-target"));
+        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
+
+        Assert.True(GuardInstaller.RemoveLegacyBinary(legacy, dryRun: false, reporter));
+        Assert.Null(new FileInfo(legacy).LinkTarget);
+    }
+
+    [Fact]
+    public void DryRunLeavesTheLegacyGuardBinary()
+    {
+        var directory = DaemonRunnerTests.TestDirectory();
+        var legacy = Path.Combine(directory, "narwhal-guard");
+        File.WriteAllText(legacy, "guard");
+        var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
+
+        Assert.False(GuardInstaller.RemoveLegacyBinary(legacy, dryRun: true, reporter));
+        Assert.True(File.Exists(legacy));
+    }
+
+    [Fact]
     public async Task StopsOnTheFirstFailingSystemctlCommand()
     {
         var directory = DaemonRunnerTests.TestDirectory();
         var plan = SystemdUnitInstaller.Plan(Config("daemon"), Path.Combine(directory, "units"));
-        var runner = new RecordingRunner(failOn: "--user disable --now narwhald-reconcile.timer");
+        var runner = new RecordingRunner(failOn: "--user disable --now narwhal-reconcile.timer");
         var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
 
         var error = await Assert.ThrowsAsync<ReconcileException>(() =>
             SystemdUnitInstaller.ApplyAsync(plan, dryRun: false, reporter, runner, CancellationToken.None));
 
         Assert.Equal(ReconcileExitCode.Runtime, error.ExitCode);
-        Assert.Contains("systemctl --user disable --now narwhald-reconcile.timer exited 1", error.Message, StringComparison.Ordinal);
+        Assert.Contains("systemctl --user disable --now narwhal-reconcile.timer exited 1", error.Message, StringComparison.Ordinal);
         Assert.Equal(
             [
                 "--user daemon-reload",
-                "--user disable --now narwhald-reconcile.timer",
+                "--user disable --now narwhal-reconcile.timer",
             ],
             runner.Commands);
     }
 
     [Theory]
-    [InlineData("daemon", "narwhald.service", "narwhald-reconcile.timer")]
-    [InlineData("timer", "narwhald-reconcile.timer", "narwhald.service")]
+    [InlineData("daemon", "narwhal.service", "narwhal-reconcile.timer")]
+    [InlineData("timer", "narwhal-reconcile.timer", "narwhal.service")]
     public void SelectsExactlyOneUnitForTheMode(string mode, string enable, string disable)
     {
         var directory = DaemonRunnerTests.TestDirectory();
@@ -142,6 +237,49 @@ public class SystemdUnitTests
     }
 
     [Fact]
+    public void PlanDisablesLegacyUserUnitsThatExist()
+    {
+        var directory = DaemonRunnerTests.TestDirectory();
+        var unitDirectory = Path.Combine(directory, "units");
+        Directory.CreateDirectory(unitDirectory);
+        File.WriteAllText(Path.Combine(unitDirectory, SystemdUnitTemplates.LegacyDaemonUnit), "old");
+        File.WriteAllText(Path.Combine(unitDirectory, SystemdUnitTemplates.LegacyReconcileService), "old");
+        File.WriteAllText(Path.Combine(unitDirectory, SystemdUnitTemplates.LegacyReconcileTimer), "old");
+
+        var plan = SystemdUnitInstaller.Plan(Config("daemon"), unitDirectory);
+
+        Assert.Equal(
+            [
+                "--user",
+                "disable",
+                "--now",
+                SystemdUnitTemplates.LegacyDaemonUnit,
+                SystemdUnitTemplates.LegacyReconcileService,
+                SystemdUnitTemplates.LegacyReconcileTimer,
+            ],
+            plan.Commands[^1]);
+    }
+
+    [Fact]
+    public void PlanGuardDisablesLegacyGuardUnitsThatExist()
+    {
+        var directory = DaemonRunnerTests.TestDirectory();
+        File.WriteAllText(Path.Combine(directory, SystemdUnitTemplates.LegacyGuardTimer), "old");
+        File.WriteAllText(Path.Combine(directory, SystemdUnitTemplates.LegacyGuardService), "old");
+
+        var plan = SystemdUnitInstaller.PlanGuard(directory);
+
+        Assert.Equal(
+            [
+                "disable",
+                "--now",
+                SystemdUnitTemplates.LegacyGuardTimer,
+                SystemdUnitTemplates.LegacyGuardService,
+            ],
+            plan.Commands[^1]);
+    }
+
+    [Fact]
     public async Task DryRunWritesNothingAndRunsNoCommands()
     {
         var directory = DaemonRunnerTests.TestDirectory();
@@ -153,8 +291,8 @@ public class SystemdUnitTests
         await SystemdUnitInstaller.ApplyAsync(plan, dryRun: true, reporter, runner: null, CancellationToken.None);
 
         Assert.False(Directory.Exists(unitDirectory));
-        Assert.Contains("would run systemctl --user enable --now narwhald.service", output.ToString(), StringComparison.Ordinal);
-        Assert.Contains("would run systemctl --user disable --now narwhald-reconcile.timer", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("would run systemctl --user enable --now narwhal.service", output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("would run systemctl --user disable --now narwhal-reconcile.timer", output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -178,8 +316,8 @@ public class SystemdUnitTests
         Assert.Equal(
             [
                 "--user daemon-reload",
-                "--user disable --now narwhald-reconcile.timer",
-                "--user enable --now narwhald.service",
+                "--user disable --now narwhal-reconcile.timer",
+                "--user enable --now narwhal.service",
             ],
             runner.Commands);
     }
@@ -209,8 +347,8 @@ public class SystemdUnitTests
             return;
 
         var directory = DaemonRunnerTests.TestDirectory();
-        var source = Path.Combine(directory, "narwhal-guard");
-        var destination = Path.Combine(directory, "libexec", "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
+        var destination = Path.Combine(directory, "libexec", "narwhal");
         File.WriteAllText(source, "guard");
         var output = new StringWriter();
         var reporter = new Narwhal.Cli.Reporter(false, false, false, output, output);
@@ -231,8 +369,8 @@ public class SystemdUnitTests
     public void DryRunDoesNotWriteTheGuardBinary()
     {
         var directory = DaemonRunnerTests.TestDirectory();
-        var source = Path.Combine(directory, "narwhal-guard");
-        var destination = Path.Combine(directory, "libexec", "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
+        var destination = Path.Combine(directory, "libexec", "narwhal");
         File.WriteAllText(source, "guard");
         var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
 
@@ -245,7 +383,7 @@ public class SystemdUnitTests
     {
         var directory = DaemonRunnerTests.TestDirectory();
         var real = Path.Combine(directory, "real");
-        var source = Path.Combine(directory, "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
         File.WriteAllText(real, "guard");
         File.CreateSymbolicLink(source, real);
         var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
@@ -258,7 +396,7 @@ public class SystemdUnitTests
     public void RejectsAnEmptyGuardSource()
     {
         var directory = DaemonRunnerTests.TestDirectory();
-        var source = Path.Combine(directory, "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
         File.WriteAllText(source, "");
         var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
 
@@ -270,7 +408,7 @@ public class SystemdUnitTests
     public void RejectsADirectoryGuardDestination()
     {
         var directory = DaemonRunnerTests.TestDirectory();
-        var source = Path.Combine(directory, "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
         var destination = Path.Combine(directory, "libexec");
         File.WriteAllText(source, "guard");
         Directory.CreateDirectory(destination);
@@ -284,8 +422,8 @@ public class SystemdUnitTests
     public void RejectsAGuardBinaryThatDoesNotMatchThePin()
     {
         var directory = DaemonRunnerTests.TestDirectory();
-        var source = Path.Combine(directory, "narwhal-guard");
-        var destination = Path.Combine(directory, "libexec", "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
+        var destination = Path.Combine(directory, "libexec", "narwhal");
         File.WriteAllText(source, "guard");
         var reporter = new Narwhal.Cli.Reporter(false, false, false, new StringWriter(), new StringWriter());
 
@@ -301,7 +439,7 @@ public class SystemdUnitTests
             return;
 
         var directory = DaemonRunnerTests.TestDirectory();
-        var source = Path.Combine(directory, "narwhal-guard");
+        var source = Path.Combine(directory, "narwhal");
         File.WriteAllText(source, "guard");
         File.SetUnixFileMode(
             source,

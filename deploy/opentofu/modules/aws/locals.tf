@@ -9,7 +9,7 @@ locals {
   image_registry = var.image_registry != "" ? var.image_registry : local.ecr_endpoint
   state_registry = var.state_registry != "" ? var.state_registry : local.ecr_endpoint
 
-  image_repositories = toset(concat(["narwhald"], var.service_images))
+  image_repositories = toset(concat(["narwhal"], var.service_images))
 
   desired_repo_name = "${var.project}/state/${local.target_id}/desired"
   status_repo_name  = "${var.project}/state/${local.target_id}/status"

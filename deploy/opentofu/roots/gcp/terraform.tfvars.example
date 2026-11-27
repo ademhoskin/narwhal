@@ -20,7 +20,7 @@ status_keys = {
 
 status_key_secret_id = "narwhal-example-prod-status-key"
 
-agent_image         = "us-central1-docker.pkg.dev/example-project-123456/narwhal-images/example/narwhald"
+agent_image         = "us-central1-docker.pkg.dev/example-project-123456/narwhal-images/example/narwhal"
 agent_digest        = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 agent_binary_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 agent_mode          = "daemon"

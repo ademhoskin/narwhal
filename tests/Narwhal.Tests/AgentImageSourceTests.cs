@@ -10,12 +10,12 @@ namespace Narwhal.Tests;
 
 public class AgentImageSourceTests
 {
-    private static readonly byte[] Binary = Encoding.UTF8.GetBytes("#!/bin/sh\necho narwhald\n");
+    private static readonly byte[] Binary = Encoding.UTF8.GetBytes("#!/bin/sh\necho narwhal\n");
 
     [Fact]
-    public async Task ExtractsNarwhaldFromAGzipTarLayer()
+    public async Task ExtractsNarwhalFromAGzipTarLayer()
     {
-        var tar = Tar("usr/local/bin/narwhald", Binary);
+        var tar = Tar("usr/local/bin/narwhal", Binary);
         var blob = Gzip(tar);
         var source = Source(blob, "application/vnd.oci.image.layer.v1.tar+gzip");
 
@@ -25,9 +25,9 @@ public class AgentImageSourceTests
     }
 
     [Fact]
-    public async Task ExtractsNarwhaldFromAPlainTarLayer()
+    public async Task ExtractsNarwhalFromAPlainTarLayer()
     {
-        var blob = Tar("narwhald", Binary);
+        var blob = Tar("narwhal", Binary);
         var source = Source(blob, RegistryAgentImageSource.TarMediaType);
 
         var binary = await source.FetchBinaryAsync(Spec(), CancellationToken.None);
@@ -46,7 +46,7 @@ public class AgentImageSourceTests
     }
 
     [Fact]
-    public async Task RejectsAnArchiveWithoutNarwhald()
+    public async Task RejectsAnArchiveWithoutNarwhal()
     {
         var blob = Tar("usr/local/bin/other", Binary);
         var source = Source(blob, RegistryAgentImageSource.TarMediaType);
@@ -80,9 +80,9 @@ public class AgentImageSourceTests
     }
 
     [Fact]
-    public async Task RejectsAnArchiveWithMoreThanOneNarwhald()
+    public async Task RejectsAnArchiveWithMoreThanOneNarwhal()
     {
-        var tar = Tar("a/narwhald", Binary, "b/narwhald", Binary);
+        var tar = Tar("a/narwhal", Binary, "b/narwhal", Binary);
         var source = Source(tar, RegistryAgentImageSource.TarMediaType);
 
         var error = await Assert.ThrowsAsync<CloudArtifactException>(() =>
@@ -92,10 +92,10 @@ public class AgentImageSourceTests
     }
 
     [Fact]
-    public async Task SelectsTheSingleLayerThatContainsNarwhald()
+    public async Task SelectsTheSingleLayerThatContainsNarwhal()
     {
         var baseLayer = Tar("etc/os-release", Encoding.UTF8.GetBytes("narwhal\n"));
-        var agentLayer = Tar("usr/local/bin/narwhald", Binary);
+        var agentLayer = Tar("usr/local/bin/narwhal", Binary);
         var source = Source(
             [baseLayer, agentLayer],
             [RegistryAgentImageSource.TarMediaType, RegistryAgentImageSource.TarMediaType]);
@@ -106,10 +106,10 @@ public class AgentImageSourceTests
     }
 
     [Fact]
-    public async Task RejectsNarwhaldInMoreThanOneLayer()
+    public async Task RejectsNarwhalInMoreThanOneLayer()
     {
         var source = Source(
-            [Tar("a/narwhald", Binary), Tar("b/narwhald", Binary)],
+            [Tar("a/narwhal", Binary), Tar("b/narwhal", Binary)],
             [RegistryAgentImageSource.TarMediaType, RegistryAgentImageSource.TarMediaType]);
 
         var error = await Assert.ThrowsAsync<CloudArtifactException>(() =>
@@ -162,7 +162,7 @@ public class AgentImageSourceTests
     private static AgentSpec Spec() => new()
     {
         Version = "0.4.0",
-        Repository = "registry.example.com/shop/narwhald",
+        Repository = "registry.example.com/shop/narwhal",
         Digest = "sha256:" + new string('d', 64),
         BinarySha256 = Convert.ToHexStringLower(SHA256.HashData(Binary)),
     };
