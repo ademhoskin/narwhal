@@ -9,6 +9,7 @@ public sealed class Manifest
     public required string Directory { get; init; }
     public required string Path { get; init; }
     public string Flake { get; init; } = ".";
+    public string Runtime { get; init; } = "podman";
     public BuildOptions Build { get; init; } = new();
     public DeployOptions Deploy { get; init; } = new();
     public List<ServiceSpec> Services { get; init; } = [];

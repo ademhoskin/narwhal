@@ -334,4 +334,4 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter) : ICon
     }
 }
 
-public sealed class PodmanException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class PodmanException(string message, Exception? inner = null) : ContainerException(message, inner);

@@ -18,7 +18,7 @@ public sealed class CommandContext
     public required Reporter Reporter { get; init; }
     public required ProcessRunner Runner { get; init; }
     public required NixClient Nix { get; init; }
-    public required IContainerClient Podman { get; init; }
+    public required IContainerClient Containers { get; init; }
 
     public string Network => Manifest.Deploy.Network ?? ContainerNaming.DefaultNetwork(Manifest.Name);
 
@@ -43,6 +43,11 @@ public sealed class CommandContext
 
         var reporter = new Reporter(options.Json, options.Verbose, options.NoColor ? false : null);
         var runner = new ProcessRunner(reporter, options.Verbose);
+        IContainerClient containers = manifest.Runtime switch
+        {
+            "docker" => new DockerClient(runner, reporter),
+            _ => new PodmanClient(runner, reporter),
+        };
 
         return new CommandContext
         {
@@ -51,7 +56,7 @@ public sealed class CommandContext
             Reporter = reporter,
             Runner = runner,
             Nix = new NixClient(runner, reporter),
-            Podman = new PodmanClient(runner, reporter),
+            Containers = containers,
         };
     }
 

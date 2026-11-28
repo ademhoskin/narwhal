@@ -68,7 +68,7 @@ public static class BuildCommands
 
                 if (!noLoad && system == CommandContext.HostSystem)
                 {
-                    var loadedId = await ctx.Podman.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
+                    var loadedId = await ctx.Containers.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
                     if (!SameId(loadedId, imageId))
                         ctx.Reporter.Warn($"'{service.Name}' ({system}) loaded as {Short(loadedId)} but the archive records {Short(imageId)}");
                 }
@@ -137,7 +137,7 @@ public static class BuildCommands
 
                     if (!noLoad && system == CommandContext.HostSystem)
                     {
-                        var loadedId = await ctx.Podman.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
+                        var loadedId = await ctx.Containers.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
                         if (!SameId(loadedId, imageId))
                             reporter.Warn($"'{service.Name}' ({system}) loaded as {Short(loadedId)} but the archive records {Short(imageId)}");
                     }
@@ -330,7 +330,7 @@ public static class BuildCommands
         {
             var reference = service.Reference(ctx.Manifest);
             using var pushLock = await PushLock.AcquireAsync(reference, PushLockTimeout, cancellationToken);
-            var previousId = await ctx.Podman.ImageIdAsync(reference, cancellationToken);
+            var previousId = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
 
             try
             {
@@ -361,17 +361,17 @@ public static class BuildCommands
             var archiveId = ArchiveImage.ReadImageId(artifact);
             RequireLockedImageId(service, system, locked, archiveId);
 
-            var current = await ctx.Podman.ImageIdAsync(reference, cancellationToken);
+            var current = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
             if (current is null || !SameId(current, archiveId))
             {
-                var loaded = await ctx.Podman.LoadImageAsync(artifact, reference, cancellationToken);
+                var loaded = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
                 if (!SameId(loaded, archiveId))
                     throw new PodmanException(
                         $"'{service.Name}' ({system}) loaded as {loaded} but the archive records {archiveId}");
             }
 
             // Push the id, not the tag: the tag may belong to another platform.
-            await ctx.Podman.PushByIdAsync(archiveId, reference, cancellationToken);
+            await ctx.Containers.PushByIdAsync(archiveId, reference, cancellationToken);
             return;
         }
 
@@ -380,12 +380,12 @@ public static class BuildCommands
             throw new PodmanException(
                 $"'{service.Name}' ({system}) has no archive on disk and no locked image id; run 'narwhal build' first");
 
-        var existing = await ctx.Podman.ImageIdAsync(reference, cancellationToken);
+        var existing = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
         if (existing is null || !SameId(existing, locked.ImageId))
             throw new PodmanException(
                 $"'{service.Name}' ({system}) archive is gone and the tag does not hold the locked image; run 'narwhal build' first");
 
-        await ctx.Podman.PushByIdAsync(locked.ImageId, reference, cancellationToken);
+        await ctx.Containers.PushByIdAsync(locked.ImageId, reference, cancellationToken);
     }
 
     private static async Task PushIndexAsync(CommandContext ctx, ServiceSpec service, string reference,
@@ -402,7 +402,7 @@ public static class BuildCommands
                     throw new PodmanException(
                         $"'{service.Name}' ({system}) has no archive on disk and no locked image id; run 'narwhal build' first");
 
-                var existing = await ctx.Podman.ImageIdAsync(locked.ImageId, cancellationToken);
+                var existing = await ctx.Containers.ImageIdAsync(locked.ImageId, cancellationToken);
                 if (existing is null || !SameId(existing, locked.ImageId))
                     throw new PodmanException(
                         $"'{service.Name}' ({system}) archive is gone and its locked image is not loaded; run 'narwhal build' first");
@@ -415,7 +415,7 @@ public static class BuildCommands
             var archiveId = ArchiveImage.ReadImageId(artifact);
             RequireLockedImageId(service, system, locked, archiveId);
 
-            var loaded = await ctx.Podman.LoadImageAsync(artifact, reference, cancellationToken);
+            var loaded = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
             if (!SameId(loaded, archiveId))
                 throw new PodmanException(
                     $"'{service.Name}' ({system}) loaded as {loaded} but the archive records {archiveId}");
@@ -424,9 +424,9 @@ public static class BuildCommands
         }
 
         // Start from an empty index so a previous failed push cannot keep stale platforms.
-        await ctx.Podman.RemoveManifestAsync(index, cancellationToken);
-        await ctx.Podman.CreateManifestAsync(index, ids, cancellationToken);
-        await ctx.Podman.PushManifestAsync(index, reference, cancellationToken);
+        await ctx.Containers.RemoveManifestAsync(index, cancellationToken);
+        await ctx.Containers.CreateManifestAsync(index, ids, cancellationToken);
+        await ctx.Containers.PushManifestAsync(index, reference, cancellationToken);
     }
 
     private static LockedPlatform RequireLockedPlatform(CommandContext ctx, ServiceSpec service, string system)
@@ -472,11 +472,11 @@ public static class BuildCommands
                     {
                         var artifact = NixClient.ResolveArtifact(host.StorePath);
                         var archiveId = ArchiveImage.ReadImageId(artifact);
-                        var current = await ctx.Podman.ImageIdAsync(reference, cancellationToken);
+                        var current = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
                         if (current is not null && SameId(current, archiveId))
                             return;
 
-                        var loaded = await ctx.Podman.LoadImageAsync(artifact, reference, cancellationToken);
+                        var loaded = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
                         if (SameId(loaded, archiveId))
                             return;
 
@@ -488,7 +488,7 @@ public static class BuildCommands
 
             if (previousId is not null)
             {
-                await ctx.Podman.TagAsync(previousId, reference, cancellationToken);
+                await ctx.Containers.TagAsync(previousId, reference, cancellationToken);
                 return;
             }
 
@@ -521,9 +521,9 @@ public static class BuildCommands
             if (service.Prebuilt)
             {
                 var reference = service.Reference(ctx.Manifest);
-                if (!await ctx.Podman.ImageExistsAsync(reference, cancellationToken))
-                    await ctx.Podman.PullAsync(reference, cancellationToken);
-                ids[service.Name] = await ctx.Podman.ImageIdAsync(reference, cancellationToken) ?? reference;
+                if (!await ctx.Containers.ImageExistsAsync(reference, cancellationToken))
+                    await ctx.Containers.PullAsync(reference, cancellationToken);
+                ids[service.Name] = await ctx.Containers.ImageIdAsync(reference, cancellationToken) ?? reference;
                 continue;
             }
 
@@ -539,7 +539,7 @@ public static class BuildCommands
             {
                 var artifact = NixClient.ResolveArtifact(locked!.StorePath);
                 var archiveId = ArchiveImage.ReadImageId(artifact);
-                var loadedId = await ctx.Podman.LoadImageAsync(artifact, service.Reference(ctx.Manifest), cancellationToken);
+                var loadedId = await ctx.Containers.LoadImageAsync(artifact, service.Reference(ctx.Manifest), cancellationToken);
                 if (!SameId(loadedId, archiveId))
                     ctx.Reporter.Warn($"'{service.Name}' loaded as {Short(loadedId)} but the archive records {Short(archiveId)}");
                 if (locked.ImageId.Length > 0 && !SameId(locked.ImageId, archiveId))
@@ -554,7 +554,7 @@ public static class BuildCommands
 
             var image = await ctx.Nix.BuildImageAsync(ctx.Manifest, service, host, cancellationToken, rebuild);
             var imageId = ArchiveImage.ReadImageId(image.ArtifactPath);
-            var hostLoadedId = await ctx.Podman.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
+            var hostLoadedId = await ctx.Containers.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
             if (!SameId(hostLoadedId, imageId))
                 ctx.Reporter.Warn($"'{service.Name}' loaded as {Short(hostLoadedId)} but the archive records {Short(imageId)}");
 
@@ -656,7 +656,7 @@ public static class BuildCommands
                 {
                     var loaded = outcome.Image.System != CommandContext.HostSystem ? "foreign"
                         : noLoad ? "skipped"
-                        : "podman";
+                        : ctx.Manifest.Runtime;
                     writer.WriteStartObject();
                     writer.WriteString("name", outcome.Service.Name);
                     writer.WriteString("system", outcome.Image.System);

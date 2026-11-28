@@ -4,7 +4,7 @@ using Narwhal.Podman;
 
 namespace Narwhal.Commands;
 
-/// <summary>up, down, ps and logs: the podman-facing commands.</summary>
+/// <summary>up, down, ps and logs: the container-facing commands.</summary>
 public static class RunCommands
 {
     public static async Task<int> UpAsync(CommandContext ctx, CliOptions options, CancellationToken cancellationToken)
@@ -41,9 +41,9 @@ public static class RunCommands
             foreach (var service in services.Where(s => !s.Prebuilt))
             {
                 var reference = service.Reference(manifest);
-                if (!await ctx.Podman.ImageExistsAsync(reference, cancellationToken))
+                if (!await ctx.Containers.ImageExistsAsync(reference, cancellationToken))
                     throw new PodmanException($"image '{reference}' is not loaded; run 'narwhal build' first");
-                imageIds[service.Name] = await ctx.Podman.ImageIdAsync(reference, cancellationToken) ?? reference;
+                imageIds[service.Name] = await ctx.Containers.ImageIdAsync(reference, cancellationToken) ?? reference;
             }
         }
         else
@@ -52,12 +52,12 @@ public static class RunCommands
         }
 
         reporter.Step($"bringing up {manifest.Name} ({services.Count} service(s))");
-        await ctx.Podman.EnsureNetworkAsync(manifest.Name, ctx.Network, cancellationToken);
+        await ctx.Containers.EnsureNetworkAsync(manifest.Name, ctx.Network, cancellationToken);
 
         foreach (var volume in services.SelectMany(s => s.Volumes).Distinct(StringComparer.Ordinal))
         {
             if (TryNamedVolume(volume, out var name))
-                await ctx.Podman.EnsureVolumeAsync(manifest.Name, name, cancellationToken);
+                await ctx.Containers.EnsureVolumeAsync(manifest.Name, name, cancellationToken);
         }
 
         foreach (var service in services)
@@ -65,10 +65,10 @@ public static class RunCommands
             await WaitForDependenciesAsync(ctx, service, waitSeconds, cancellationToken);
 
             var container = ctx.ContainerName(service);
-            await ctx.Podman.RemoveContainerAsync(container, cancellationToken);
+            await ctx.Containers.RemoveContainerAsync(container, cancellationToken);
 
             var imageId = imageIds.TryGetValue(service.Name, out var id) ? id : "";
-            await ctx.Podman.RunAsync(manifest, service, ctx.Network, container,
+            await ctx.Containers.RunAsync(manifest, service, ctx.Network, container,
                 service.Reference(manifest), imageId, cancellationToken);
 
             if (service.Healthcheck is not null)
@@ -83,16 +83,16 @@ public static class RunCommands
     public static async Task<int> DownAsync(CommandContext ctx, CliOptions options, CancellationToken cancellationToken)
     {
         var reporter = ctx.Reporter;
-        var containers = await ctx.Podman.ListAsync(ctx.Manifest.Name, cancellationToken);
+        var containers = await ctx.Containers.ListAsync(ctx.Manifest.Name, cancellationToken);
         foreach (var container in containers)
-            await ctx.Podman.RemoveContainerAsync(container.Name, cancellationToken);
+            await ctx.Containers.RemoveContainerAsync(container.Name, cancellationToken);
 
         var removedVolumes = 0;
         if (options.Flag("volumes"))
         {
-            foreach (var volume in await ctx.Podman.ProjectVolumesAsync(ctx.Manifest.Name, cancellationToken))
+            foreach (var volume in await ctx.Containers.ProjectVolumesAsync(ctx.Manifest.Name, cancellationToken))
             {
-                await ctx.Podman.RemoveVolumeAsync(volume, cancellationToken);
+                await ctx.Containers.RemoveVolumeAsync(volume, cancellationToken);
                 removedVolumes++;
             }
         }
@@ -124,7 +124,7 @@ public static class RunCommands
     public static async Task<int> PsAsync(CommandContext ctx, CancellationToken cancellationToken)
     {
         var reporter = ctx.Reporter;
-        var containers = await ctx.Podman.ListAsync(ctx.Manifest.Name, cancellationToken);
+        var containers = await ctx.Containers.ListAsync(ctx.Manifest.Name, cancellationToken);
         var byName = containers.ToDictionary(c => c.Name, StringComparer.Ordinal);
 
         var rows = new List<IReadOnlyList<string>>();
@@ -179,12 +179,12 @@ public static class RunCommands
         foreach (var service in services)
         {
             var container = ctx.ContainerName(service);
-            if (!await ctx.Podman.ContainerExistsAsync(container, cancellationToken))
+            if (!await ctx.Containers.ContainerExistsAsync(container, cancellationToken))
                 throw new PodmanException($"'{service.Name}' has no container; run 'narwhal up' first");
             containers.Add(container);
         }
 
-        await ctx.Podman.LogsAsync(containers, options.Flag("follow"),
+        await ctx.Containers.LogsAsync(containers, options.Flag("follow"),
             options.IntValue("tail"), options.Flag("timestamps"), cancellationToken);
         return 0;
     }
@@ -200,8 +200,8 @@ public static class RunCommands
 
             while (true)
             {
-                var health = await ctx.Podman.HealthAsync(container, cancellationToken);
-                var state = await ctx.Podman.StateAsync(container, cancellationToken);
+                var health = await ctx.Containers.HealthAsync(container, cancellationToken);
+                var state = await ctx.Containers.StateAsync(container, cancellationToken);
 
                 if (health == "healthy" || (health is null && state == "running"))
                     break;
@@ -224,7 +224,7 @@ public static class RunCommands
 
         while (DateTimeOffset.UtcNow < deadline)
         {
-            var health = await ctx.Podman.HealthAsync(container, cancellationToken);
+            var health = await ctx.Containers.HealthAsync(container, cancellationToken);
             if (health == "healthy")
             {
                 ctx.Reporter.Ok($"{service.Name} healthy as {container}");

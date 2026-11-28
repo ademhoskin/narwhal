@@ -5,8 +5,8 @@ using Narwhal.Cli;
 using Narwhal.Commands;
 using Narwhal.Config;
 using Narwhal.Nix;
-using Narwhal.Podman;
 using Narwhal.Reconcile;
+using Narwhal.Runtime;
 
 namespace Narwhal;
 
@@ -87,7 +87,7 @@ public static class App
             var message = "error: " + e.Message + (e.Detail is null ? "" : "\n" + Indent(e.Detail));
             return Fail(options, message, 2);
         }
-        catch (PodmanException e)
+        catch (ContainerException e)
         {
             return Fail(options, "error: " + e.Message, 3);
         }

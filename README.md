@@ -59,6 +59,7 @@ narwhal down
 
 ```toml
 name = "shop"            # project name; prefixes container and network names
+runtime = "podman"      # container runtime: "podman" (default) or "docker"
 flake = "."              # flake that provides the images
 
 [build]

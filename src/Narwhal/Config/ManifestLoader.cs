@@ -74,6 +74,10 @@ public static class ManifestLoader
             };
         }) ?? new DeployOptions();
 
+        var runtime = read.OptionalString("runtime") ?? "podman";
+        if (runtime is not ("podman" or "docker"))
+            throw new ManifestException($"{fullPath}: runtime must be \"podman\" or \"docker\", found \"{runtime}\"");
+
         var services = new List<ServiceSpec>();
         if (root.Get("service") is { } serviceValue)
         {
@@ -97,6 +101,7 @@ public static class ManifestLoader
             Directory = directory,
             Path = fullPath,
             Flake = read.OptionalString("flake") ?? ".",
+            Runtime = runtime,
             Build = build,
             Deploy = deploy,
             Services = services,
