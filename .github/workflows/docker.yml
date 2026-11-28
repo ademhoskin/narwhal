@@ -42,6 +42,26 @@ jobs:
       - name: verify reproducibility
         working-directory: ${{ runner.temp }}/narwhal-example
         run: '"$NARWHAL_BIN" verify'
+      - name: push to a local registry
+        working-directory: ${{ runner.temp }}/narwhal-example
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name narwhal-registry -p 127.0.0.1:5002:5000 registry:2
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5002/v2/ > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:5002/v2/ > /dev/null
+          sed -i 's|^image = "narwhal-example/web"$|image = "127.0.0.1:5002/narwhal-example/web"|' narwhal.toml
+          "$NARWHAL_BIN" push
+          pushed=$(jq -r '.config.digest' \
+            <(curl -fsS -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              http://127.0.0.1:5002/v2/narwhal-example/web/manifests/latest))
+          locked=$(jq -r '.services.web.platforms["x86_64-linux"].image_id' narwhal.lock.json)
+          test -n "$pushed"
+          test "$pushed" != "null"
+          test "$pushed" = "$locked"
+          echo "pushed manifest config digest $pushed"
       - name: deploy with docker
         working-directory: ${{ runner.temp }}/narwhal-example
         run: |
@@ -53,3 +73,4 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/narwhal-example" 2>/dev/null || exit 0
           "$NARWHAL_BIN" down --volumes || true
+          docker rm -f narwhal-registry > /dev/null 2>&1 || true
