@@ -1,31 +1,14 @@
 using System.Text.Json;
 using Narwhal.Cli;
 using Narwhal.Config;
+using Narwhal.Runtime;
 
 namespace Narwhal.Podman;
 
-public sealed record ContainerInfo(
-    string Name,
-    string State,
-    string Status,
-    string Image,
-    string Ports,
-    string Health,
-    string Id);
-
 /// <summary>Wrapper around podman, always invoked with explicit argument lists.</summary>
-public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
+public sealed class PodmanClient(ProcessRunner runner, Reporter reporter) : IContainerClient
 {
-    public const string ProjectLabel = "io.narwhal.project";
-    public const string ServiceLabel = "io.narwhal.service";
-    public const string ManifestLabel = "io.narwhal.manifest";
-    public const string ImageIdLabel = "io.narwhal.image-id";
-
     public static string Executable => Environment.GetEnvironmentVariable("NARWHAL_PODMAN") ?? "podman";
-
-    public static string ContainerName(string project, string service) => $"{project}-{service}";
-
-    public static string DefaultNetwork(string project) => $"narwhal-{project}";
 
     public async Task EnsureNetworkAsync(string project, string network, CancellationToken cancellationToken)
     {
@@ -36,7 +19,7 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
 
         reporter.Detail($"creating network {network}");
         await runner.RunAsync(Executable,
-            ["network", "create", "--label", $"{ProjectLabel}={project}", network],
+            ["network", "create", "--label", $"{ContainerNaming.ProjectLabel}={project}", network],
             new ProcessOptions { Check = true }, cancellationToken);
     }
 
@@ -48,7 +31,7 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
             return;
 
         await runner.RunAsync(Executable,
-            ["volume", "create", "--label", $"{ProjectLabel}={project}", name],
+            ["volume", "create", "--label", $"{ContainerNaming.ProjectLabel}={project}", name],
             new ProcessOptions { Check = true }, cancellationToken);
     }
 
@@ -132,10 +115,10 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
             "--name", containerName,
             "--network", network,
             "--restart", service.RestartPolicy(manifest),
-            "--label", $"{ProjectLabel}={manifest.Name}",
-            "--label", $"{ServiceLabel}={service.Name}",
-            "--label", $"{ManifestLabel}={manifest.ContentHash}",
-            "--label", $"{ImageIdLabel}={imageId}",
+            "--label", $"{ContainerNaming.ProjectLabel}={manifest.Name}",
+            "--label", $"{ContainerNaming.ServiceLabel}={service.Name}",
+            "--label", $"{ContainerNaming.ManifestLabel}={manifest.ContentHash}",
+            "--label", $"{ContainerNaming.ImageIdLabel}={imageId}",
         };
 
         foreach (var port in service.Ports)
@@ -201,7 +184,7 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
     public async Task<IReadOnlyList<ContainerInfo>> ListAsync(string project, CancellationToken cancellationToken)
     {
         var result = await runner.RunAsync(Executable,
-            ["ps", "--all", "--filter", $"label={ProjectLabel}={project}", "--format", "json"],
+            ["ps", "--all", "--filter", $"label={ContainerNaming.ProjectLabel}={project}", "--format", "json"],
             new ProcessOptions { Check = true }, cancellationToken);
 
         var containers = new List<ContainerInfo>();
@@ -292,7 +275,7 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter)
     public async Task<IReadOnlyList<string>> ProjectVolumesAsync(string project, CancellationToken cancellationToken)
     {
         var result = await runner.RunAsync(Executable,
-            ["volume", "ls", "--filter", $"label={ProjectLabel}={project}", "--format", "{{.Name}}"],
+            ["volume", "ls", "--filter", $"label={ContainerNaming.ProjectLabel}={project}", "--format", "{{.Name}}"],
             new ProcessOptions { Check = true }, cancellationToken);
         return result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }

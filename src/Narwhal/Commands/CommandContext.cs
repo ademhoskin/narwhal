@@ -2,6 +2,7 @@ using Narwhal.Cli;
 using Narwhal.Config;
 using Narwhal.Nix;
 using Narwhal.Podman;
+using Narwhal.Runtime;
 
 namespace Narwhal.Commands;
 
@@ -17,9 +18,9 @@ public sealed class CommandContext
     public required Reporter Reporter { get; init; }
     public required ProcessRunner Runner { get; init; }
     public required NixClient Nix { get; init; }
-    public required PodmanClient Podman { get; init; }
+    public required IContainerClient Podman { get; init; }
 
-    public string Network => Manifest.Deploy.Network ?? PodmanClient.DefaultNetwork(Manifest.Name);
+    public string Network => Manifest.Deploy.Network ?? ContainerNaming.DefaultNetwork(Manifest.Name);
 
     public static string HostSystem => NixPlatform.ContainerSystem;
 
@@ -67,7 +68,7 @@ public sealed class CommandContext
         return includePrebuilt ? selected : selected.Where(s => !s.Prebuilt).ToList();
     }
 
-    public string ContainerName(ServiceSpec service) => PodmanClient.ContainerName(Manifest.Name, service.Name);
+    public string ContainerName(ServiceSpec service) => ContainerNaming.ContainerName(Manifest.Name, service.Name);
 
     /// <summary>Configured systems, or the subset named by repeated <c>--system</c> flags.</summary>
     public IReadOnlyList<string> SelectSystems(CliOptions options)
