@@ -49,7 +49,9 @@ fi
 export NARWHAL_SYSTEM="$host_system"
 expected_arches="$(printf '%s\n' "$host_arch" "$foreign_arch" | sort | paste -sd, -)"
 
-if [ -n "${NARWHAL_DLL:-}" ]; then
+if [ -n "${NARWHAL_BIN:-}" ]; then
+  NARWHAL_CMD=("$NARWHAL_BIN")
+elif [ -n "${NARWHAL_DLL:-}" ]; then
   NARWHAL_CMD=(dotnet "$NARWHAL_DLL")
 else
   command -v dotnet >/dev/null || skip "dotnet is not installed"
@@ -245,11 +247,15 @@ done
 # Localhost registries are HTTP; point podman at a throwaway insecure config
 # instead of changing the machine's registries.conf.
 cat > "$work/registries.conf" <<EOF
-[registries.search]
-registries = []
+unqualified-search-registries = []
 
-[registries.insecure]
-registries = ["localhost:$port", "127.0.0.1:$port"]
+[[registry]]
+location = "localhost:$port"
+insecure = true
+
+[[registry]]
+location = "127.0.0.1:$port"
+insecure = true
 EOF
 export CONTAINERS_REGISTRIES_CONF="$work/registries.conf"
 

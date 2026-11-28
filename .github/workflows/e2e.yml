@@ -11,6 +11,8 @@ jobs:
   e2e:
     name: e2e registry and concurrent push
     runs-on: ubuntu-latest
+    env:
+      NARWHAL_BIN: ${{ github.workspace }}/result/bin/narwhal
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v32
@@ -25,8 +27,8 @@ jobs:
           podman info > /dev/null
           podman pull docker.io/library/registry:2
           podman image exists docker.io/library/registry:2
-      # The scripts select the CLI with NARWHAL_DLL (dotnet <dll>), otherwise
-      # `dotnet run --project src/Narwhal`; the devshell supplies that SDK.
+      # The scripts prefer NARWHAL_BIN, then NARWHAL_DLL (dotnet <dll>), then
+      # `dotnet run --project src/Narwhal`; CI sets NARWHAL_BIN.
       - name: local registry push
         run: |
           set +e
