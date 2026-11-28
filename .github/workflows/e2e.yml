@@ -1,0 +1,51 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  e2e:
+    name: e2e registry and concurrent push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: build the package
+        run: nix build .#default
+      - name: smoke test
+        run: |
+          test "$(result/bin/narwhal version)" = "0.1.0"
+          result/bin/narwhal --help > /dev/null
+      - name: pre-pull the registry image
+        run: |
+          podman info > /dev/null
+          podman pull docker.io/library/registry:2
+          podman image exists docker.io/library/registry:2
+      # The scripts select the CLI with NARWHAL_DLL (dotnet <dll>), otherwise
+      # `dotnet run --project src/Narwhal`; the devshell supplies that SDK.
+      - name: local registry push
+        run: |
+          set +e
+          nix develop --command bash tests/e2e/local-registry-push.sh
+          status=$?
+          set -e
+          if [ "$status" -eq 77 ]; then
+            echo "::error::local-registry-push.sh exited 77 (skip): podman, curl, jq, bash >= 4.4, or registry:2 is unavailable"
+            exit 1
+          fi
+          exit "$status"
+      - name: local registry concurrent push
+        run: |
+          set +e
+          nix develop --command bash tests/e2e/local-registry-concurrent-push.sh
+          status=$?
+          set -e
+          if [ "$status" -eq 77 ]; then
+            echo "::error::local-registry-concurrent-push.sh exited 77 (skip): podman, curl, jq, bash >= 4.4, or registry:2 is unavailable"
+            exit 1
+          fi
+          exit "$status"
