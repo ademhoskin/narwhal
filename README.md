@@ -1,7 +1,7 @@
 # narwhal
 
 Reproducible containerized builds for simplified deployment, using **Nix flakes**
-to build OCI images and **podman** to run them.
+to build OCI images and **podman or docker** to run them.
 
 `narwhal` is a single native binary. You describe a **service container** in
 `narwhal.toml`, the images come from a Nix flake, and narwhal handles the rest:
@@ -13,17 +13,18 @@ build, pin, load, start, health-check, verify, push, tear down.
   proves they still match.
 - **Fast feedback.** The CLI is .NET 11 compiled ahead-of-time: one ~4 MB
   binary, no runtime, no NuGet at run time.
-- **Podman-native.** Rootless containers, named networks, labelled volumes and
-  health checks; no compose file, no daemon.
+- **Runtime-selectable.** `runtime = "podman"` (default) or `"docker"`: rootless
+  podman containers, or a Docker daemon, with named networks, labelled volumes
+  and health checks. No compose file.
 
 ```
-narwhal.toml + flake.nix  ->  nix build  ->  podman load  ->  podman run
+narwhal.toml + flake.nix  ->  nix build  ->  podman|docker load  ->  run
 ```
 
 ## Requirements
 
 - Nix with flakes enabled (`experimental-features = nix-command flakes`)
-- podman 5+
+- podman 5+ (default runtime), or Docker 29+ with the containerd image store
 - `oras` for registry operations (the packaged `narwhal` wrapper supplies it;
   install `nixpkgs#oras` when running from a source build)
 
@@ -44,7 +45,7 @@ mkdir hello && cd hello
 narwhal init                      # narwhal.toml + flake.nix
 
 nix flake lock                    # pin nixpkgs and narwhal
-narwhal build                     # build images, load into podman, write the lock
+narwhal build                     # build images, load into the runtime, write the lock
 narwhal up                        # create network, start services, wait for health
 curl localhost:8080               # hello from hello
 narwhal ps
@@ -94,6 +95,14 @@ interval = 2       # seconds
 retries = 20
 timeout = 3
 ```
+
+Set `runtime` to select the container CLI: `podman` (default) or `docker`. The
+lock always records the docker-archive config digest as `image_id`, whichever
+runtime is used. Docker's containerd image store reports and accepts only the
+manifest digest, so on the docker path narwhal loads the archive and uses the
+daemon-reported id when tagging and pushing; podman image ids are the config
+digest. The reconcile daemon/agent and its systemd units remain podman-only
+today.
 
 Set `prebuilt = true` to use an image from a registry instead of building one:
 
@@ -199,15 +208,15 @@ narwhal verify           # rebuild and compare both fingerprints; exit 4 on drif
 
 `verify` is a CI gate: it rebuilds every service/system and fails if the Nix
 content hash (`nar_hash`) or image id (`image_id`) moved. The host platform is
-loaded through podman; foreign platforms are checked from their archives, so
-verification needs no emulator. A changed `narwhal.toml` is reported as a
-warning; a changed image is a failure.
+loaded through the configured runtime; foreign platforms are checked from their
+archives, so verification needs no emulator. A changed `narwhal.toml` is
+reported as a warning; a changed image is a failure.
 
 ## Multiple platforms
 
 `build.systems` names every platform a project ships. `narwhal build` builds one
 image per service and system, records each under its own `platforms` entry, and
-loads only the host platform into podman by default:
+loads only the host platform into the configured runtime by default:
 
 ```toml
 [build]
@@ -231,27 +240,33 @@ reports all missing or drifting entries before exiting.
 
 Foreign platforms are verified from the archive: the image id is read from the
 docker-archive `manifest.json`, so no foreign image has to be loadable by the
-local podman. Loading the host platform still uses `podman load` and warns if
-the loaded id differs from the archive.
+local runtime. Loading the host platform uses the runtime's load command and
+warns if the loaded id differs from the archive. On podman the loaded id is the
+config digest; docker reports a manifest digest that cannot be compared with it,
+so that warning is skipped on the docker path.
 
 `up` runs the host platform only. If the host system is not in `build.systems`
 it fails with a usage error listing the configured systems.
 
 `push` validates each locked platform against the manifest attr and, when the
-archive is present, its image id, then pushes exactly that id rather than
+archive is present, its image id, then pushes exactly that image rather than
 whatever currently owns the tag. A stale lock fails and asks for
 `narwhal build`; it never silently pushes a different image. A single platform
-loads its archive and runs `podman push <sha256-id> docker://<reference>`. If
-the archive was garbage-collected but the lock records an id, push accepts an
-already-loaded image whose id matches the lock.
+loads its archive: podman runs `podman push <sha256-id> docker://<reference>`,
+while docker tags the daemon-reported manifest digest and runs
+`docker push <reference>` (docker cannot push a bare id). If the archive was
+garbage-collected but the lock records an id, push accepts an already-loaded
+image whose id matches the lock (podman only; docker cannot address the config
+digest).
 
 With more than one platform, push loads each archive and builds a local manifest
 list under a dedicated, destination-specific name,
 `localhost/narwhal-index/<project>/<service>-<hash>:<tag>`, so the image tag is
 never used as the manifest name. It removes any previous local index first,
-then runs
-`podman manifest push --all --rm <index> docker://<reference>`
-to publish a multi-arch OCI index and remove the local list:
+then runs `podman manifest push --all --rm <index> docker://<reference>` (or,
+for docker, creates the list at the destination with `docker manifest create`
+and runs `docker manifest push --purge <reference>`) to publish a multi-arch OCI
+index and remove the local list:
 
 ```sh
 narwhal push
@@ -259,18 +274,20 @@ narwhal push --system x86_64-linux --system aarch64-linux api
 ```
 
 Lock entries store `image_id` as `sha256:<config-hex>` read from the
-docker-archive `manifest.json`. Podman reports the same id without the prefix,
-so comparisons accept either form.
+docker-archive `manifest.json`, regardless of runtime. Podman reports the same
+id without the prefix, so comparisons accept either form. Docker's containerd
+image store reports the manifest digest instead, so the loaded docker id is not
+compared with the archive and push tags that daemon-reported id.
 
 After a push, the local image tag is left on the host platform when the host is
 configured, so a later foreign-only push does not change which platform the tag
 names. When the host is not configured, push restores the tag's previous image
 id. A host lock entry whose attr or OCI platform no longer matches the manifest,
-or a reload that returns an unexpected id, falls back to that previous tag with
-a warning.
+or a podman reload that returns an unexpected id, falls back to that previous tag
+with a warning.
 
 Multi-platform push also accepts locked ids whose archives were collected, as
-long as each locked image is still loaded locally.
+long as each locked image is still loaded locally (podman only).
 
 ## Commands
 
@@ -290,7 +307,7 @@ long as each locked image is still loaded locally.
 Global options: `--file <path>`, `--lock <path>`, `-C/--dir <path>`, `--json`,
 `-v/--verbose`, `--no-color`, `-h/--help`.
 
-Exit codes: `0` success, `1` usage/manifest, `2` build failure, `3` podman/tool
+Exit codes: `0` success, `1` usage/manifest, `2` build failure, `3` container/tool
 failure, `4` reproducibility mismatch, `130` interrupted.
 
 ## Development

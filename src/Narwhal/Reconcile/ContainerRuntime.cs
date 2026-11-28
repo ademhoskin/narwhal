@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Narwhal.Cli;
 using Narwhal.Podman;
+using Narwhal.Runtime;
 
 namespace Narwhal.Reconcile;
 
@@ -29,8 +30,8 @@ public sealed class ContainerObservation
 
 public static class ReconcileLabels
 {
-    public const string Project = "io.narwhal.project";
-    public const string Service = "io.narwhal.service";
+    public const string Project = ContainerNaming.ProjectLabel;
+    public const string Service = ContainerNaming.ServiceLabel;
     public const string Generation = "io.narwhal.generation";
     public const string ConfigHash = "io.narwhal.config-hash";
     public const string Image = "io.narwhal.image";
