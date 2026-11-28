@@ -5,6 +5,7 @@ path. `Test` names are `tests/Narwhal.Tests/<File>.cs::<Method>`; `GAP` means no
 test covers the scenario yet. This is a map, not an essay.
 
 Run: `nix develop -c dotnet test tests/Narwhal.Tests --nologo`
+Current suite: 758 passed / 3 skipped / 0 failed (e2e registry tests self-skip).
 
 The local-registry e2e is opt-in and self-skips without podman, curl, jq, or a
 pullable `registry:2` image; it may pull that image once and only serves over
@@ -12,16 +13,41 @@ loopback:
 `NARWHAL_E2E_REGISTRY=1 nix develop -c dotnet test tests/Narwhal.Tests --nologo --filter FullyQualifiedName~LocalRegistryPushTests`,
 or directly: `nix develop -c bash tests/e2e/local-registry-push.sh`.
 
+## CI/CD workflows
+
+| Workflow | Covers |
+| --- | --- |
+| `ci.yml` | analyzer and `dotnet format` / `nix fmt` gates; unit tests; native AOT build and smoke test; podman example build, verify, up, ps, down |
+| `e2e.yml` | local-registry push and concurrent-push scripts against a real registry; fails rather than skips when prerequisites are missing |
+| `docker.yml` | docker example: build, verify, push to a local registry (the pushed `config.digest` equals the locked id), up, ps, down |
+| `release.yml` | tag-triggered x64 and arm64 AOT builds, smoke tests, GitHub release upload |
+| `flake-check.yml` | weekly `nix flake update`, build, and unit tests; opens an issue on failure |
+
 ## Exit codes
 
 | Code | Contract | Covered by |
 | --- | --- | --- |
 | 0 | success, including "nothing to do" paths | `MultiPlatformIntegrationTests.cs::BuildsVerifiesPlansPushesAndRunsEveryConfiguredSystem` (build, plan, verify, up), `PushesWhenTheLockedStorePathIsADirectory` (build, push), `PushLeavesTheTagOnTheHostForEitherSystemOrder` (push) |
-| 1 | usage, manifest, or configuration error | `MultiPlatformIntegrationTests.cs::SelectingOneSystemBuildsAndLocksOnlyThatSystem` (unknown `--system`), `MultiPlatformIntegrationTests.cs::UpFailsWhenTheHostIsNotConfigured` (host not configured), `MultiPlatformIntegrationTests.cs::PushRefusesPrebuiltServices` (prebuilt push); parser/loader units cover the messages but not `App.Main` returning 1: missing manifest, invalid TOML, unknown service, unknown flag, missing option value, no command: GAP |
+| 1 | usage, manifest, or configuration error | `MultiPlatformIntegrationTests.cs::SelectingOneSystemBuildsAndLocksOnlyThatSystem` (unknown `--system`), `MultiPlatformIntegrationTests.cs::UpFailsWhenTheHostIsNotConfigured` (host not configured), `MultiPlatformIntegrationTests.cs::PushRefusesPrebuiltServices` (prebuilt push), `ManifestRuntimeTests.cs::RejectsAnUnknownRuntime` (unknown `runtime`; through `App.Main`: GAP); parser/loader units cover the messages but not `App.Main` returning 1: missing manifest, invalid TOML, unknown service, unknown flag, missing option value, no command: GAP |
 | 2 | build failure (`BuildException`) | GAP (no test drives a failing nix build through `App.Main`) |
-| 3 | podman/tool/process failure | `MultiPlatformIntegrationTests.cs::DriftedLockImageIdBlocksPushBeforeAnyPush`, `MultiPlatformIntegrationTests.cs::StaleLockAttrBlocksPush`, `MultiPlatformIntegrationTests.cs::RestoreFailureDoesNotMaskTheOriginalPushFailure`, `MultiPlatformIntegrationTests.cs::PushRequiresALockEntryForTheSelectedService`; missing container and missing tool: GAP |
-| 4 | reproducibility mismatch | `MultiPlatformIntegrationTests.cs::LockedBuildReportsEveryMissingAndDriftingPlatform`, `MultiPlatformIntegrationTests.cs::VerifyReportsDriftForOnePlatform`; missing lock: GAP |
+| 3 | container runtime/tool/process failure | `MultiPlatformIntegrationTests.cs::DriftedLockImageIdBlocksPushBeforeAnyPush`, `MultiPlatformIntegrationTests.cs::StaleLockAttrBlocksPush`, `MultiPlatformIntegrationTests.cs::RestoreFailureDoesNotMaskTheOriginalPushFailure`, `MultiPlatformIntegrationTests.cs::PushRequiresALockEntryForTheSelectedService`; missing container and missing tool: GAP |
+| 4 | reproducibility mismatch | `MultiPlatformIntegrationTests.cs::LockedBuildReportsEveryMissingAndDriftingPlatform`, `MultiPlatformIntegrationTests.cs::VerifyReportsDriftForOnePlatform`, `DockerRuntimeIntegrationTests.cs::VerifyReportsAFailedRowWhenDockerLoadFails` (docker load failure during verify); missing lock: GAP |
 | 130 | interrupted (Ctrl-C / cancellation) | GAP |
+
+## runtime selection
+
+| Scenario | Given / When / Then | Test |
+| --- | --- | --- |
+| default podman | Given no `runtime`; When loaded; Then `Runtime` is `podman` and the context builds a `PodmanClient` | `ManifestRuntimeTests.cs::DefaultsToPodman`, `ManifestRuntimeTests.cs::ContextBuildsTheClientNamedByTheManifest` |
+| docker selection | Given `runtime = "docker"`; When loaded; Then `Runtime` is `docker` and the context builds a `DockerClient` | `ManifestRuntimeTests.cs::LoadsDockerRuntime`, `ManifestRuntimeTests.cs::ContextBuildsTheClientNamedByTheManifest` |
+| unknown runtime | Given `runtime = "containerd"`; When loaded; Then `ManifestException` names `runtime` and the value; `App.Main` exit 1: GAP | `ManifestRuntimeTests.cs::RejectsAnUnknownRuntime` |
+| non-string runtime | Given `runtime = 1`; When loaded; Then `ManifestException` names `runtime` | `ManifestRuntimeTests.cs::RejectsANonStringRuntime` |
+| lock stores config digest | Given a docker build; When the lock is written; Then `image_id` is the docker-archive config digest, not the daemon id | `DockerRuntimeIntegrationTests.cs::PushTagsAndPushesTheDockerResolvableManifestId` |
+| docker reports manifest digest | Given a docker build; When the host archive is loaded; Then the daemon id differs from the locked config digest | `DockerRuntimeIntegrationTests.cs::PushTagsAndPushesTheDockerResolvableManifestId` |
+| docker push tags daemon id | Given a docker build; When push; Then the daemon-reported id is tagged and pushed, since docker cannot push a bare id | `DockerRuntimeIntegrationTests.cs::PushTagsAndPushesTheDockerResolvableManifestId`, `DockerClientTests.cs::PushTagsTheImageIdAndPushesTheDestination` |
+| load warning skipped | Given a docker host load; When build runs; Then no "loaded as" warning is printed for the config-vs-manifest digest difference | `DockerRuntimeIntegrationTests.cs::PushTagsAndPushesTheDockerResolvableManifestId` |
+| reconcile podman-only | Given `runtime = "docker"`; When `reconcile` runs; Then the agent path still drives podman and ignores `runtime` | GAP (source: `Reconcile/ContainerRuntime.cs` is podman-only) |
+| client op parity | Given the docker client; When network/volume/run/load/inspect/ps/logs/state/health/manifest/volume commands run; Then they issue the docker argument forms | `DockerClientTests.cs::EnsureNetworkInspectsThenCreatesWithTheProjectLabel`, `EnsureVolumeInspectsThenCreatesWithTheProjectLabel`, `RunPinsEveryDockerFlagFromTheManifest`, `LoadParsesADockerImageNameAndRetagsIt`, `LoadParsesALoadedImageIdAndRetagsIt`, `ImageQueriesUseDockerInspect`, `ListParsesDockerNdjsonAndHealthStatus`, `LogsRunsOncePerContainerWithTheRequestedFlags`, `ManifestCreateAndPushRebuildTheListAtTheDestination`, `ManifestPushOmitsInsecureForARemoteRegistry`, `StateAndHealthUseTheDockerInspectFormats`, `ContainerInspectDrivesExistsAndForceRemoval`, `VolumeListAndRemovalUseDockerVolumeCommands` |
 
 ## init
 
@@ -60,6 +86,7 @@ or directly: `nix develop -c bash tests/e2e/local-registry-push.sh`.
 | no buildable services | Given only prebuilt services; When build; Then exit 0 with "no buildable services" | GAP |
 | prebuilt filtering | Given a mix of prebuilt and buildable services; When build; Then nix is only invoked for the buildable ones | GAP |
 | directory store artifact | Given nix reports a directory containing `tarball`; When build/push; Then `ResolveArtifact` finds the archive | `MultiPlatformIntegrationTests.cs::PushesWhenTheLockedStorePathIsADirectory` |
+| docker host load | Given `runtime = "docker"` and a host system; When `build`; Then the host archive loads, no config-vs-manifest warning prints, and exit is 0 | `DockerRuntimeIntegrationTests.cs::PushTagsAndPushesTheDockerResolvableManifestId` |
 | lock covers all systems | Given a build for a subset of systems; When the lock is written; Then `manifest_sha256` is cleared | `MultiPlatformIntegrationTests.cs::IncompleteCoverageClearsTheManifestHash` |
 | migration write-back | Given a v1 lock; When build/up reuses it; Then a v2 lock is written | `MultiPlatformIntegrationTests.cs::ReusableUpPersistsAVersionOneMigration`, `LockFileTests.cs::MigratesVersionOneUsingTheAttrSystem` |
 | --no-load | Given `--no-load`; When build; Then archives are not handed to podman | `MultiPlatformIntegrationTests.cs::LockedBuildReportsEveryMissingAndDriftingPlatform` (flag accepted), full assertion: GAP |
@@ -130,6 +157,9 @@ or directly: `nix develop -c bash tests/e2e/local-registry-push.sh`.
 | restore failure | Given push and tag restore both fail; When push; Then exit 3 and the original push error survives | `MultiPlatformIntegrationTests.cs::RestoreFailureDoesNotMaskTheOriginalPushFailure` |
 | prebuilt refusal | Given `push db` where `db` is prebuilt; When push; Then exit 1 with "does not push images it did not build" and no podman call | `MultiPlatformIntegrationTests.cs::PushRefusesPrebuiltServices` |
 | missing lock entry | Given no lock entry for a selected service; When push; Then exit 3 suggests `narwhal build` | `MultiPlatformIntegrationTests.cs::PushRequiresALockEntryForTheSelectedService` |
+| docker single platform | Given `runtime = "docker"` and one host platform; When push; Then the daemon-reported manifest id is tagged and pushed, exit 0 | `DockerRuntimeIntegrationTests.cs::PushTagsAndPushesTheDockerResolvableManifestId` |
+| docker multi-arch index | Given `runtime = "docker"` and two built platforms; When push; Then the index is built from the daemon manifest ids, never the archive config digests | `DockerRuntimeIntegrationTests.cs::MultiPlatformPushBuildsTheIndexFromLoadedManifestIds` |
+| docker collected archive | Given `runtime = "docker"` and the archive was collected; When push; Then exit 3, because docker cannot address the locked config digest | GAP |
 
 ## verify
 
@@ -139,7 +169,7 @@ or directly: `nix develop -c bash tests/e2e/local-registry-push.sh`.
 | one platform drifts | Given one drifted nar hash; When verify; Then exit 4 lists only that service/system | `MultiPlatformIntegrationTests.cs::VerifyReportsDriftForOnePlatform` |
 | missing platform | Given a locked service missing one configured system; When verify; Then that pair is reported `missing` and exit is 4 | GAP |
 | missing lock | Given no lock entries; When verify; Then exit 4 suggests `narwhal build` | GAP |
-| build failure during verify | Given nix fails; When verify; Then the pair is listed `build failed` and exit is 4 | GAP |
+| build failure during verify | Given the docker load fails; When verify; Then the pair is listed `build failed` and exit is 4; a nix build failure: GAP | `DockerRuntimeIntegrationTests.cs::VerifyReportsAFailedRowWhenDockerLoadFails` |
 | manifest changed | Given the manifest hash differs; When verify; Then a warning says attrs are verified against the old lock | GAP |
 | JSON shape | Given `verify --json`; Then `{project, ok, services[]{name,system,platform,ok,detail}}` is emitted | GAP |
 
@@ -206,14 +236,15 @@ Command-level gaps (no `App.Main` acceptance test):
 1. `init`: all scenarios (scaffold, name, overwrite guard, `--force`, `--narwhal-ref`, sanitisation).
 2. `plan`: human table, every status value, prebuilt rows, stale warning, no-lock note, `--refresh`.
 3. `build`: failing nix build (exit 2), `--locked` success, `--no-load` assertion, `--rebuild`, prebuilt filtering, no buildable services, atomic lock write.
-4. `up`/`deploy`: dependency closure, network/volume creation, health waiting, prebuilt pull, host-lock reuse, `--no-build`, `--build`+`--no-build`, `--wait` bounds, `--json`.
+4. `up`/`deploy`: dependency closure, network/volume creation, health waiting, prebuilt pull, host-lock reuse, `--no-build`, `--build`+`--no-build`, `--wait` bounds, `--json`; docker `up` at the command level.
 5. `down`: all scenarios.
 6. `ps`: human and JSON output.
-7. `logs`: missing container, unknown service, podman argument forwarding.
-8. `verify`: missing lock, missing platform row, build failure row, manifest-changed warning, `--json`.
+7. `logs`: missing container, unknown service, podman/docker argument forwarding through the command.
+8. `verify`: missing lock, missing platform row, missing nix build failure row, manifest-changed warning, `--json`.
 9. `version` and `help <command>` output.
 10. Global: missing manifest, invalid TOML through the CLI, unknown service, no command, `--file`, `--lock`, missing `-C`, `--json` error envelope, `--verbose`.
 11. Exit codes with no end-to-end test: 2 (build failure), 130 (interrupt), 3 for missing tool/container.
 12. JSON shapes not asserted: `build`, `verify`, `up`, `down`, `ps`, error envelope; `version --json` is plain text by design.
+13. Runtime: unknown `runtime` through `App.Main` (exit 1), docker push with a collected archive (exit 3), and reconcile under `runtime = "docker"` (the agent path is podman-only).
 
 Out of scope this round: fake-harness extraction, cloud work.

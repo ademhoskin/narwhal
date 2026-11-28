@@ -2046,6 +2046,11 @@ preserves the existing `deploy` behavior without sharing a command spec.
 `narwhal up` keeps its current spec and rejects `--target`; the cloud options
 exist only on the `deploy` spec. The command table in 6.2 uses the same split.
 
+The local CLI also accepts `runtime = "docker"` and drives the Docker CLI for
+`build`, `verify`, `up`, and `push` on Docker hosts. The cloud path does not
+follow it: the reconcile engine, pull agent, and systemd units remain podman-only
+today, and this design continues to specify rootless podman for VM targets.
+
 Repository configuration:
 
 ```toml
