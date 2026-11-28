@@ -26,6 +26,13 @@ public static class ContainerNaming
 /// <summary>Container operations the CLI needs, independent of the container runtime.</summary>
 public interface IContainerClient
 {
+    /// <summary>
+    /// Whether <see cref="ImageIdAsync"/> returns docker-archive config digests.
+    /// Podman image ids are config digests; Docker's containerd image store
+    /// reports the manifest digest, which is the only id it can tag.
+    /// </summary>
+    bool ImageIdsMatchArchiveConfig { get; }
+
     Task EnsureNetworkAsync(string project, string network, CancellationToken cancellationToken);
     Task EnsureVolumeAsync(string project, string name, CancellationToken cancellationToken);
     Task<string> LoadImageAsync(string artifactPath, string reference, CancellationToken cancellationToken);

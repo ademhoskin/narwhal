@@ -10,6 +10,8 @@ public sealed class PodmanClient(ProcessRunner runner, Reporter reporter) : ICon
 {
     public static string Executable => Environment.GetEnvironmentVariable("NARWHAL_PODMAN") ?? "podman";
 
+    public bool ImageIdsMatchArchiveConfig => true;
+
     public async Task EnsureNetworkAsync(string project, string network, CancellationToken cancellationToken)
     {
         var exists = await runner.RunAsync(Executable, ["network", "exists", network],

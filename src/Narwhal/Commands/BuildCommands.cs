@@ -4,6 +4,7 @@ using Narwhal.Config;
 using Narwhal.Nix;
 using Narwhal.Oci;
 using Narwhal.Podman;
+using Narwhal.Runtime;
 
 namespace Narwhal.Commands;
 
@@ -69,7 +70,7 @@ public static class BuildCommands
                 if (!noLoad && system == CommandContext.HostSystem)
                 {
                     var loadedId = await ctx.Containers.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
-                    if (!SameId(loadedId, imageId))
+                    if (!LoadMatchesArchive(ctx.Containers, loadedId, imageId))
                         ctx.Reporter.Warn($"'{service.Name}' ({system}) loaded as {Short(loadedId)} but the archive records {Short(imageId)}");
                 }
 
@@ -138,7 +139,7 @@ public static class BuildCommands
                     if (!noLoad && system == CommandContext.HostSystem)
                     {
                         var loadedId = await ctx.Containers.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
-                        if (!SameId(loadedId, imageId))
+                        if (!LoadMatchesArchive(ctx.Containers, loadedId, imageId))
                             reporter.Warn($"'{service.Name}' ({system}) loaded as {Short(loadedId)} but the archive records {Short(imageId)}");
                     }
 
@@ -152,7 +153,7 @@ public static class BuildCommands
                         idOk ? Short(locked.ImageId) : $"{Short(locked.ImageId)} != {Short(imageId)}"]);
                     json.Add((service.Name, system, platform, ok, ok ? "match" : "mismatch"));
                 }
-                catch (Exception e) when (e is BuildException or PodmanException)
+                catch (Exception e) when (e is BuildException or ContainerException or ProcessFailureException)
                 {
                     failures.Add($"{service.Name}/{system}");
                     rows.Add([service.Name, system, "build failed", FirstLine(e), "-"]);
@@ -361,28 +362,37 @@ public static class BuildCommands
             var archiveId = ArchiveImage.ReadImageId(artifact);
             RequireLockedImageId(service, system, locked, archiveId);
 
+            // Push the runtime id, not the tag: the tag may belong to another platform.
+            // Docker reports a manifest digest it can tag, not the archive config digest.
             var current = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
-            if (current is null || !SameId(current, archiveId))
+            string pushId;
+            if (ctx.Containers.ImageIdsMatchArchiveConfig && current is not null && SameId(current, archiveId))
             {
-                var loaded = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
-                if (!SameId(loaded, archiveId))
-                    throw new PodmanException(
-                        $"'{service.Name}' ({system}) loaded as {loaded} but the archive records {archiveId}");
+                pushId = current;
+            }
+            else
+            {
+                pushId = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
+                if (!LoadMatchesArchive(ctx.Containers, pushId, archiveId))
+                    throw new ContainerException(
+                        $"'{service.Name}' ({system}) loaded as {pushId} but the archive records {archiveId}");
             }
 
-            // Push the id, not the tag: the tag may belong to another platform.
-            await ctx.Containers.PushByIdAsync(archiveId, reference, cancellationToken);
+            await ctx.Containers.PushByIdAsync(pushId, reference, cancellationToken);
             return;
         }
 
         // The archive was collected: the lock can still identify an already-loaded image.
         if (locked.ImageId.Length == 0)
-            throw new PodmanException(
+            throw new ContainerException(
                 $"'{service.Name}' ({system}) has no archive on disk and no locked image id; run 'narwhal build' first");
+        if (!ctx.Containers.ImageIdsMatchArchiveConfig)
+            throw new ContainerException(
+                $"'{service.Name}' ({system}) has no archive on disk; {ctx.Manifest.Runtime} cannot address a locked image id; run 'narwhal build' first");
 
         var existing = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
         if (existing is null || !SameId(existing, locked.ImageId))
-            throw new PodmanException(
+            throw new ContainerException(
                 $"'{service.Name}' ({system}) archive is gone and the tag does not hold the locked image; run 'narwhal build' first");
 
         await ctx.Containers.PushByIdAsync(locked.ImageId, reference, cancellationToken);
@@ -399,12 +409,15 @@ public static class BuildCommands
             if (!StorePathExists(locked.StorePath))
             {
                 if (locked.ImageId.Length == 0)
-                    throw new PodmanException(
+                    throw new ContainerException(
                         $"'{service.Name}' ({system}) has no archive on disk and no locked image id; run 'narwhal build' first");
+                if (!ctx.Containers.ImageIdsMatchArchiveConfig)
+                    throw new ContainerException(
+                        $"'{service.Name}' ({system}) has no archive on disk; {ctx.Manifest.Runtime} cannot address a locked image id; run 'narwhal build' first");
 
                 var existing = await ctx.Containers.ImageIdAsync(locked.ImageId, cancellationToken);
                 if (existing is null || !SameId(existing, locked.ImageId))
-                    throw new PodmanException(
+                    throw new ContainerException(
                         $"'{service.Name}' ({system}) archive is gone and its locked image is not loaded; run 'narwhal build' first");
 
                 ids.Add(locked.ImageId);
@@ -416,11 +429,12 @@ public static class BuildCommands
             RequireLockedImageId(service, system, locked, archiveId);
 
             var loaded = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
-            if (!SameId(loaded, archiveId))
-                throw new PodmanException(
+            if (!LoadMatchesArchive(ctx.Containers, loaded, archiveId))
+                throw new ContainerException(
                     $"'{service.Name}' ({system}) loaded as {loaded} but the archive records {archiveId}");
 
-            ids.Add(archiveId);
+            // Add the runtime id: the archive config digest is not addressable on docker.
+            ids.Add(loaded);
         }
 
         // Start from an empty index so a previous failed push cannot keep stale platforms.
@@ -432,11 +446,11 @@ public static class BuildCommands
     private static LockedPlatform RequireLockedPlatform(CommandContext ctx, ServiceSpec service, string system)
     {
         var locked = ctx.Lock.Platform(service.Name, system)
-            ?? throw new PodmanException($"'{service.Name}' has no locked image for {system}; run 'narwhal build' first");
+            ?? throw new ContainerException($"'{service.Name}' has no locked image for {system}; run 'narwhal build' first");
 
         var attr = service.AttrPath(ctx.Manifest, system);
         if (locked.Attr != attr)
-            throw new PodmanException(
+            throw new ContainerException(
                 $"'{service.Name}' ({system}) lock attr is '{locked.Attr}' but the manifest expects '{attr}'; run 'narwhal build' first");
 
         return locked;
@@ -446,7 +460,7 @@ public static class BuildCommands
         LockedPlatform locked, string archiveId)
     {
         if (locked.ImageId.Length > 0 && !SameId(locked.ImageId, archiveId))
-            throw new PodmanException(
+            throw new ContainerException(
                 $"'{service.Name}' ({system}) lock records image {locked.ImageId} but the archive is {archiveId}; run 'narwhal build' first");
     }
 
@@ -473,11 +487,11 @@ public static class BuildCommands
                         var artifact = NixClient.ResolveArtifact(host.StorePath);
                         var archiveId = ArchiveImage.ReadImageId(artifact);
                         var current = await ctx.Containers.ImageIdAsync(reference, cancellationToken);
-                        if (current is not null && SameId(current, archiveId))
+                        if (ctx.Containers.ImageIdsMatchArchiveConfig && current is not null && SameId(current, archiveId))
                             return;
 
                         var loaded = await ctx.Containers.LoadImageAsync(artifact, reference, cancellationToken);
-                        if (SameId(loaded, archiveId))
+                        if (LoadMatchesArchive(ctx.Containers, loaded, archiveId))
                             return;
 
                         ctx.Reporter.Warn(
@@ -540,7 +554,7 @@ public static class BuildCommands
                 var artifact = NixClient.ResolveArtifact(locked!.StorePath);
                 var archiveId = ArchiveImage.ReadImageId(artifact);
                 var loadedId = await ctx.Containers.LoadImageAsync(artifact, service.Reference(ctx.Manifest), cancellationToken);
-                if (!SameId(loadedId, archiveId))
+                if (!LoadMatchesArchive(ctx.Containers, loadedId, archiveId))
                     ctx.Reporter.Warn($"'{service.Name}' loaded as {Short(loadedId)} but the archive records {Short(archiveId)}");
                 if (locked.ImageId.Length > 0 && !SameId(locked.ImageId, archiveId))
                     ctx.Reporter.Warn($"'{service.Name}' archive is {Short(archiveId)} but the lock records {Short(locked.ImageId)}");
@@ -555,7 +569,7 @@ public static class BuildCommands
             var image = await ctx.Nix.BuildImageAsync(ctx.Manifest, service, host, cancellationToken, rebuild);
             var imageId = ArchiveImage.ReadImageId(image.ArtifactPath);
             var hostLoadedId = await ctx.Containers.LoadImageAsync(image.ArtifactPath, service.Reference(ctx.Manifest), cancellationToken);
-            if (!SameId(hostLoadedId, imageId))
+            if (!LoadMatchesArchive(ctx.Containers, hostLoadedId, imageId))
                 ctx.Reporter.Warn($"'{service.Name}' loaded as {Short(hostLoadedId)} but the archive records {Short(imageId)}");
 
             ids[service.Name] = hostLoadedId;
@@ -698,6 +712,9 @@ public static class BuildCommands
         var hash = Hashing.Sha256Hex(reference)[..12];
         return $"localhost/narwhal-index/{manifest.Name}/{service.Name}-{hash}:{service.Tag}";
     }
+
+    private static bool LoadMatchesArchive(IContainerClient containers, string runtimeId, string archiveId) =>
+        !containers.ImageIdsMatchArchiveConfig || SameId(runtimeId, archiveId);
 
     private static bool SameId(string left, string right) =>
         string.Equals(NormalizeId(left), NormalizeId(right), StringComparison.OrdinalIgnoreCase);

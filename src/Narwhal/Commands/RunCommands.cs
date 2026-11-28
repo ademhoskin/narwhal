@@ -1,6 +1,6 @@
 using Narwhal.Cli;
 using Narwhal.Config;
-using Narwhal.Podman;
+using Narwhal.Runtime;
 
 namespace Narwhal.Commands;
 
@@ -42,7 +42,7 @@ public static class RunCommands
             {
                 var reference = service.Reference(manifest);
                 if (!await ctx.Containers.ImageExistsAsync(reference, cancellationToken))
-                    throw new PodmanException($"image '{reference}' is not loaded; run 'narwhal build' first");
+                    throw new ContainerException($"image '{reference}' is not loaded; run 'narwhal build' first");
                 imageIds[service.Name] = await ctx.Containers.ImageIdAsync(reference, cancellationToken) ?? reference;
             }
         }
@@ -180,7 +180,7 @@ public static class RunCommands
         {
             var container = ctx.ContainerName(service);
             if (!await ctx.Containers.ContainerExistsAsync(container, cancellationToken))
-                throw new PodmanException($"'{service.Name}' has no container; run 'narwhal up' first");
+                throw new ContainerException($"'{service.Name}' has no container; run 'narwhal up' first");
             containers.Add(container);
         }
 
@@ -206,9 +206,9 @@ public static class RunCommands
                 if (health == "healthy" || (health is null && state == "running"))
                     break;
                 if (health == "unhealthy" || state is "exited" or "dead")
-                    throw new PodmanException($"dependency '{dependency}' is {health ?? state}; not starting '{service.Name}'");
+                    throw new ContainerException($"dependency '{dependency}' is {health ?? state}; not starting '{service.Name}'");
                 if (DateTimeOffset.UtcNow > deadline)
-                    throw new PodmanException($"timed out waiting for dependency '{dependency}' to become ready");
+                    throw new ContainerException($"timed out waiting for dependency '{dependency}' to become ready");
 
                 await Task.Delay(500, cancellationToken);
             }
@@ -232,7 +232,7 @@ public static class RunCommands
             }
 
             if (health == "unhealthy")
-                throw new PodmanException($"'{service.Name}' failed its healthcheck; see 'narwhal logs {service.Name}'");
+                throw new ContainerException($"'{service.Name}' failed its healthcheck; see 'narwhal logs {service.Name}'");
 
             if (!reported)
             {
@@ -243,7 +243,7 @@ public static class RunCommands
             await Task.Delay(1000, cancellationToken);
         }
 
-        throw new PodmanException($"timed out after {timeout.TotalSeconds:0}s waiting for '{service.Name}' to become healthy");
+        throw new ContainerException($"timed out after {timeout.TotalSeconds:0}s waiting for '{service.Name}' to become healthy");
     }
 
     /// <summary>volume specs look like name:/path or /path, or name:/path:opts.</summary>

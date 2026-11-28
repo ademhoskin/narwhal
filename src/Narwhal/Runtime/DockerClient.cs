@@ -16,6 +16,8 @@ public sealed class DockerClient(ProcessRunner runner, Reporter reporter, string
 
     public string Executable => _executable ?? Environment.GetEnvironmentVariable("NARWHAL_DOCKER") ?? "docker";
 
+    public bool ImageIdsMatchArchiveConfig => false;
+
     public async Task EnsureNetworkAsync(string project, string network, CancellationToken cancellationToken)
     {
         var exists = await runner.RunAsync(Executable, ["network", "inspect", network],
