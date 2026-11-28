@@ -1,0 +1,55 @@
+name: docker
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-example:
+    name: docker example builds, deploys and verifies
+    runs-on: ubuntu-latest
+    env:
+      NARWHAL_BIN: ${{ github.workspace }}/result/bin/narwhal
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v32
+      - name: build the package
+        run: nix build .#default
+      - name: smoke test
+        run: |
+          test "$("$NARWHAL_BIN" version)" = "0.1.0"
+          "$NARWHAL_BIN" --help > /dev/null
+      # The copy keeps the example out of the checkout. Its `path:../..` flake
+      # input assumed the checkout layout, so point it at the workspace and
+      # re-lock that input while keeping the pinned nixpkgs.
+      - name: copy the example and select the docker runtime
+        run: |
+          example="$RUNNER_TEMP/narwhal-example"
+          rm -rf "$example"
+          cp -a examples/hello "$example"
+          sed -i '/^flake = "."$/a runtime = "docker"' "$example/narwhal.toml"
+          sed -i "s|path:../..|path:$GITHUB_WORKSPACE|" "$example/flake.nix"
+          jq 'del(.nodes.narwhal) | del(.nodes.root.inputs.narwhal)' "$example/flake.lock" \
+            > "$example/flake.lock.tmp"
+          mv "$example/flake.lock.tmp" "$example/flake.lock"
+          grep -Fx 'runtime = "docker"' "$example/narwhal.toml"
+      - name: build images and write the lock
+        working-directory: ${{ runner.temp }}/narwhal-example
+        run: '"$NARWHAL_BIN" build'
+      - name: verify reproducibility
+        working-directory: ${{ runner.temp }}/narwhal-example
+        run: '"$NARWHAL_BIN" verify'
+      - name: deploy with docker
+        working-directory: ${{ runner.temp }}/narwhal-example
+        run: |
+          "$NARWHAL_BIN" up
+          curl -fsS --retry 5 --retry-connrefused http://127.0.0.1:18080/
+          "$NARWHAL_BIN" ps
+      - name: tear down
+        if: always()
+        run: |
+          cd "$RUNNER_TEMP/narwhal-example" 2>/dev/null || exit 0
+          "$NARWHAL_BIN" down --volumes || true
