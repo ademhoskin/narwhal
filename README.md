@@ -11,7 +11,7 @@ build, pin, load, start, health-check, verify, push, tear down.
   inputs give the same bytes. `narwhal build` records the Nix content hash and
   the resulting image id in `narwhal.lock.json`; `narwhal verify` rebuilds and
   proves they still match.
-- **Fast feedback.** The CLI is .NET 11 compiled ahead-of-time: one ~4 MB
+- **Fast feedback.** The CLI is .NET 11 compiled ahead-of-time: one ~10 MB
   binary, no runtime, no NuGet at run time.
 - **Runtime-selectable.** `runtime = "podman"` (default) or `"docker"`: rootless
   podman containers, or a Docker daemon, with named networks, labelled volumes
@@ -35,7 +35,7 @@ nix profile install github:ademhoskin/narwhal     # or:
 nix run github:ademhoskin/narwhal -- --help
 ```
 
-The flake builds `narwhal` as a native AOT binary (~4 MB) with no .NET runtime
+The flake builds `narwhal` as a native AOT binary (~10 MB) with no .NET runtime
 dependency. `nix build .#default` in a checkout works too.
 
 ## Quickstart
